@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<OutputType>WinExe</OutputType>
+		<TargetFramework>net10.0-windows</TargetFramework>
+		<UseWindowsForms>true</UseWindowsForms>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+	
+		<NoWarn>$(NoWarn);WFO1000</NoWarn>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<None Include="Providers\SBXPC\SDK\SBXPCDLL64.dll">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		</None>
+		<None Include="Providers\SBXPC\SDK\SBPCCOMM64.dll">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		</None>
+	</ItemGroup>
+
+</Project>
