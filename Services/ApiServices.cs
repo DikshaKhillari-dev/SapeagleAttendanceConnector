@@ -256,7 +256,12 @@ public class ApiService
             var data = await resp.Content.ReadFromJsonAsync<EmployeesByCompanyResponse>(cancellationToken: ct);
             var newCache = new Dictionary<string, long>();
             if (data?.Employees != null)
-                foreach (var e in data.Employees) newCache[e.EmpCode] = e.Id;
+                foreach (var e in data.Employees)
+                    newCache[e.EmpCode] = e.Id;
+
+            var mapping = await GetEmployeeMappingAsync(comId, ct);
+            foreach (var kv in mapping)
+                newCache[kv.Key] = kv.Value;
 
             _empCacheByComId[comId] = newCache;
             _empCacheLoadedAtByComId[comId] = DateTime.UtcNow;
@@ -291,8 +296,6 @@ public class ApiService
         public string EmpLoginName { get; set; } = "";
     }
 
-    // Department-filtered employee list. Hits a separate endpoint from employees-by-company
-    // so the existing sync/resolve flows above are left untouched.
     public async Task<List<ErpEmployee>> GetEmployeesForSyncAsync(int comId, int? departmentId, CancellationToken ct = default)
     {
         var result = new List<ErpEmployee>();
@@ -312,8 +315,7 @@ public class ApiService
             var data = await resp.Content.ReadFromJsonAsync<EmployeesByCompanyResponse>(cancellationToken: ct);
             if (data?.Employees != null)
                 foreach (var e in data.Employees)
-                    result.Add(new ErpEmployee { EmployeeCode = e.EmpCode, EmployeeName = e.EmpLoginName });
-
+                    result.Add(new ErpEmployee { EmployeeCode = e.EmpCode, EmployeeName = e.EmpLoginName, EmployeeId = e.Id });
             Logger.Log($"[Api] GetEmployeesForSyncAsync(dept): fetched {result.Count} employee(s) for ComId={comId}, DepartmentId={(departmentId.HasValue ? departmentId.Value.ToString() : "All")}.");
         }
         catch (Exception ex)
@@ -322,6 +324,51 @@ public class ApiService
         }
 
         return result;
+    }
+
+    public async Task<Dictionary<string, long>> GetEmployeeMappingAsync(int comId, CancellationToken ct = default)
+    {
+        var result = new Dictionary<string, long>();
+        try
+        {
+            var resp = await _http.GetAsync($"/api/AttendanceEmployeeMapping/list?comId={comId}", ct);
+            if (!resp.IsSuccessStatusCode) return result;
+
+            var data = await resp.Content.ReadFromJsonAsync<MappingListResponse>(cancellationToken: ct);
+            if (data?.Data != null)
+                foreach (var m in data.Data)
+                    result[m.EnrollNumber] = m.EmpId;
+        }
+        catch (Exception ex)
+        {
+            Logger.Log($"[Api] GetEmployeeMappingAsync: exception - {ex.Message}");
+        }
+        return result;
+    }
+
+    public async Task<bool> SaveEmployeeMappingAsync(List<EmployeeMappingEntry> mappings, CancellationToken ct = default)
+    {
+        try
+        {
+            var resp = await _http.PostAsJsonAsync("/api/AttendanceEmployeeMapping/save-bulk", mappings, ct);
+            return resp.IsSuccessStatusCode;
+        }
+        catch (Exception ex)
+        {
+            Logger.Log($"[Api] SaveEmployeeMappingAsync: exception - {ex.Message}");
+            return false;
+        }
+    }
+
+    private class MappingListResponse
+    {
+        public bool Success { get; set; }
+        public List<MappingItem> Data { get; set; } = new();
+    }
+    private class MappingItem
+    {
+        public string EnrollNumber { get; set; } = "";
+        public long EmpId { get; set; }
     }
 
     public async Task<List<Department>> GetDepartmentsAsync(int comId, CancellationToken ct = default)

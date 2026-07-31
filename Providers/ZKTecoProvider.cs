@@ -174,7 +174,7 @@ public class ZKTecoProvider : IAttendanceProvider
         return employees;
     }
 
-    public bool CreateEmployee(string enrollNumber, string employeeName)
+    public bool CreateEmployee(string enrollNumber, string employeeName, string? fallbackNumericId = null)
     {
         if (!_isConnected && !Connect()) return false;
 

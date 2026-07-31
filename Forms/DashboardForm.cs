@@ -38,6 +38,7 @@ public class DashboardForm : Form
 
     private readonly Button _btnSyncNow = new() { Text = "Sync Now" };
     private readonly Button _btnSyncEmployees = new() { Text = "Sync Employees" };
+    private readonly Button _btnMapUsers = new() { Text = "Map Users" };
     private readonly Button _btnExit = new() { Text = "Exit" };
 
     public DashboardForm(
@@ -80,6 +81,7 @@ public class DashboardForm : Form
 
         _btnSyncNow.Click += async (_, _) => await RunSyncAsync();
         _btnSyncEmployees.Click += async (_, _) => await RunEmployeeSyncAsync();
+        _btnMapUsers.Click += async (_, _) => await RunMapUsersAsync();
         _btnExit.Click += (_, _) => { _trayIcon.Visible = false; Application.Exit(); };
 
         _trayIcon = new NotifyIcon
@@ -94,6 +96,7 @@ public class DashboardForm : Form
         trayMenu.Items.Add("Open", null, (_, _) => { Show(); WindowState = FormWindowState.Normal; });
         trayMenu.Items.Add("Sync Now", null, async (_, _) => await RunSyncAsync());
         trayMenu.Items.Add("Sync Employees", null, async (_, _) => await RunEmployeeSyncAsync());
+        trayMenu.Items.Add("Map Users", null, async (_, _) => await RunMapUsersAsync());
         trayMenu.Items.Add("Exit", null, (_, _) => { _trayIcon.Visible = false; Application.Exit(); });
         _trayIcon.ContextMenuStrip = trayMenu;
 
@@ -143,8 +146,9 @@ public class DashboardForm : Form
 
         Theme.StylePrimaryButton(_btnSyncNow);
         Theme.StylePrimaryButton(_btnSyncEmployees);
+        Theme.StyleSecondaryButton(_btnMapUsers);   
         Theme.StyleSecondaryButton(_btnExit);
-        foreach (var b in new[] { _btnSyncNow, _btnSyncEmployees, _btnExit })
+        foreach (var b in new[] { _btnSyncNow, _btnSyncEmployees, _btnMapUsers, _btnExit })
             Theme.ApplyRoundedCorners(b, 8);
 
         var buttonRow = new TableLayoutPanel
@@ -152,16 +156,17 @@ public class DashboardForm : Form
             Dock = DockStyle.Top,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            ColumnCount = 3,
+            ColumnCount = 4,
             RowCount = 1,
             Margin = new Padding(0, 10, 0, 0)
         };
-        buttonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34));
-        buttonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33));
-        buttonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33));
+        buttonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+        buttonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+        buttonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+        buttonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
         buttonRow.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
 
-        var actionButtons = new[] { _btnSyncNow, _btnSyncEmployees, _btnExit };
+        var actionButtons = new[] { _btnSyncNow, _btnSyncEmployees, _btnMapUsers, _btnExit };
         foreach (var b in actionButtons)
         {
             b.AutoSize = false;
@@ -171,6 +176,7 @@ public class DashboardForm : Form
         buttonRow.Controls.Add(actionButtons[0], 0, 0);
         buttonRow.Controls.Add(actionButtons[1], 1, 0);
         buttonRow.Controls.Add(actionButtons[2], 2, 0);
+        buttonRow.Controls.Add(actionButtons[3], 3, 0);
 
         // Bottom-to-top: buttonRow added first, then label above it.
         actionsCard.Controls.Add(buttonRow);
@@ -258,6 +264,8 @@ public class DashboardForm : Form
 
                 Logger.Log($"[EmployeeSync] '{machine.MachineName}' DeviceId(raw)='{machine.DeviceId}' parsed -> machineNumber={machineNumber}");
 
+                _syncService.DisconnectMachine(machine.Id);
+
                 var preview = await _employeeSyncService.PrepareAsync(machine, machineNumber);
                 if (preview == null)
                 {
@@ -296,6 +304,71 @@ public class DashboardForm : Form
         finally
         {
             _btnSyncEmployees.Enabled = true;
+        }
+    }
+
+    private async Task RunMapUsersAsync()
+    {
+        _btnMapUsers.Enabled = false;
+        try
+        {
+            if (_company.Machines.Count == 0)
+            {
+                MessageBox.Show(this, "No machines activated.", "Map Existing Users",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            var machines = new List<MachineConfig>();
+            foreach (var m in _company.Machines)
+            {
+                var mc = await _apiService.GetMachineAsync(m.MachineId);
+                if (mc != null) machines.Add(mc);
+            }
+
+            if (machines.Count == 0)
+            {
+                MessageBox.Show(this, "Could not fetch activated machine details.", "Map Existing Users",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            foreach (var machine in machines)
+            {
+                if (!int.TryParse(machine.DeviceId, out int machineNumber))
+                {
+                    Logger.Log($"[MapUsers] '{machine.MachineName}' has invalid Device ID '{machine.DeviceId}', skipped.");
+                    continue;
+                }
+
+                _syncService.DisconnectMachine(machine.Id);
+
+                var preview = await _employeeSyncService.PrepareAsync(machine, machineNumber);
+                if (preview == null)
+                {
+                    MessageBox.Show(this,
+                        $"Could not connect to '{machine.MachineName}' ({machine.IpAddress}).",
+                        "Map Existing Users", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    continue;
+                }
+
+                try
+                {
+                    using var dialog = new MapExistingUsersForm(
+                        preview.DeviceLabel, preview.MachineEmployees, preview.ErpEmployees,
+                        _apiService, machine.ComId, machine.MachineType);
+                    dialog.ShowDialog(this);
+                }
+                finally
+                {
+                    preview.Provider.Disconnect();
+                    preview.Provider.Dispose();
+                }
+            }
+        }
+        finally
+        {
+            _btnMapUsers.Enabled = true;
         }
     }
 

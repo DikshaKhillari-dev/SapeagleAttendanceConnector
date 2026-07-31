@@ -8,7 +8,7 @@ public interface IAttendanceProvider : IDisposable
 
     List<Models.MachineEmployee> ReadExistingEmployees();
 
-    bool CreateEmployee(string enrollNumber, string employeeName);
+    bool CreateEmployee(string enrollNumber, string employeeName, string? fallbackNumericId = null);
 
     bool DeleteEmployee(string enrollNumber);
 }

@@ -82,6 +82,7 @@ public class EmployeeSyncService
         };
 
         var currentIds = new HashSet<string>(preview.MachineEmployees.Select(m => m.EnrollNumber));
+        var currentIdsSet = currentIds;
 
         if (deleteExisting)
         {
@@ -107,17 +108,17 @@ public class EmployeeSyncService
         {
             if (ct.IsCancellationRequested) break;
 
-            if (!deleteExisting && currentIds.Contains(erpEmp.EmployeeCode))
+            if (!deleteExisting && (currentIds.Contains(erpEmp.EmployeeCode) || currentIds.Contains(erpEmp.EmployeeId.ToString())))
             {
                 result.Skipped++;
                 continue;
             }
 
-            bool created = provider.CreateEmployee(erpEmp.EmployeeCode, erpEmp.EmployeeName);
-            if (created)
+            bool created = provider.CreateEmployee(erpEmp.EmployeeCode, erpEmp.EmployeeName, erpEmp.EmployeeId.ToString()); if (created)
             {
                 result.CreatedNew++;
                 currentIds.Add(erpEmp.EmployeeCode);
+                currentIds.Add(erpEmp.EmployeeId.ToString());
             }
             else
             {

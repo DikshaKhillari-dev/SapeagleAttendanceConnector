@@ -54,11 +54,19 @@ public class SBXPCProvider : IAttendanceProvider
             while (SBXPCNative.GetAllGLogData(_machineNumber, out int enroll, out int verify,
                        out int y, out int mo, out int d, out int h, out int mi))
             {
+                int attendanceStatus = (verify >> 8) & 0xFF;
+                int inOutMode = attendanceStatus switch
+                {
+                    0 or 2 or 4 => 0, 
+                    1 or 3 or 5 => 1, 
+                    _ => 2            
+                };
+
                 allRecords.Add(new AttendancePunch
                 {
                     EnrollNumber = enroll.ToString(),
                     VerifyMode = verify,
-                    InOutMode = 0,
+                    InOutMode = inOutMode,
                     Timestamp = new DateTime(y, mo, d, h, mi, 0)
                 });
             }
@@ -104,19 +112,24 @@ public class SBXPCProvider : IAttendanceProvider
         return employees;
     }
 
-    public bool CreateEmployee(string enrollNumber, string employeeName)
+    public bool CreateEmployee(string enrollNumber, string employeeName, string? fallbackNumericId = null)
     {
         if (!_connected && !Connect()) return false;
+
         if (!int.TryParse(enrollNumber, out int idNum))
         {
-            Logger.Log($"[SBXPC] CreateEmployee: '{enrollNumber}' is not numeric, skipped.");
-            return false;
+            if (string.IsNullOrEmpty(fallbackNumericId) || !int.TryParse(fallbackNumericId, out idNum))
+            {
+                Logger.Log($"[SBXPC] CreateEmployee: '{enrollNumber}' is not numeric and no valid fallback id, skipped.");
+                return false;
+            }
+            Logger.Log($"[SBXPC] CreateEmployee: '{enrollNumber}' is not numeric, using fallback id '{fallbackNumericId}' instead.");
         }
 
         bool created = SBXPCNative.SetEnrollData(_machineNumber, idNum);
         if (created) SBXPCNative.SetUserName1(_machineNumber, idNum, employeeName);
 
-        Logger.Log($"[SBXPC] CreateEmployee EnrollNumber={enrollNumber} Name={employeeName} -> {created}");
+        Logger.Log($"[SBXPC] CreateEmployee EnrollNumber={idNum} Name={employeeName} -> {created}");
         return created;
     }
 

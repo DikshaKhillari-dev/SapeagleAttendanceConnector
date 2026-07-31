@@ -207,4 +207,14 @@ public class SyncService
     {
         foreach (var p in _deviceProviders.Values) p.Disconnect();
     }
+
+    public void DisconnectMachine(int machineConfigId)
+    {
+        if (_deviceProviders.TryGetValue(machineConfigId, out var provider))
+        {
+            Logger.Log($"[Sync] DisconnectMachine: releasing connection for MachineConfig.Id={machineConfigId} " +
+                       "so another process can connect (e.g. Employee Sync).");
+            provider.Disconnect();
+        }
+    }
 }
