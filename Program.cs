@@ -61,7 +61,7 @@ internal static class Program
             company = configService.Load();
         }
 
-        var dashboard = new DashboardForm(company, apiService, configService, syncService, employeeSyncService);
+        var dashboard = new DashboardForm(company, apiService, configService, syncService, employeeSyncService, checkpointService);
 
         var listenerThread = new System.Threading.Thread(() =>
         {

@@ -80,11 +80,22 @@ public class MapExistingUsersForm : Form
             ReadOnly = true,
             FillWeight = 30
         };
+
+        var displayList = _erpEmployees
+            .Select(e => new ErpEmployee
+            {
+                EmployeeId = e.EmployeeId,
+                EmployeeCode = e.EmployeeCode,
+                EmployeeName = string.IsNullOrWhiteSpace(e.EmployeeName) ? e.EmployeeCode : e.EmployeeName
+            })
+            .OrderBy(e => e.EmployeeName)
+            .ToList();
+
         var colErp = new DataGridViewComboBoxColumn
         {
             Name = "ErpEmployee",
             HeaderText = "MAP TO ERP EMPLOYEE",
-            DataSource = _erpEmployees.OrderBy(e => e.EmployeeName).ToList(),
+            DataSource = displayList,
             DisplayMember = nameof(ErpEmployee.EmployeeName),
             ValueMember = nameof(ErpEmployee.EmployeeId),
             FillWeight = 45,

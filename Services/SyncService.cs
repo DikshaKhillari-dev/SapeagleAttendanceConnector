@@ -12,7 +12,7 @@ public class SyncService
     private readonly Dictionary<string, DateTime> _lastProcessed = new();
     private static readonly TimeSpan DedupWindow = TimeSpan.FromSeconds(60);
 
-   
+
     private readonly Dictionary<(string EnrollNumber, DateTime Date), bool> _backlogSessionOpen = new();
 
     public event Action<string>? StatusChanged;
@@ -86,7 +86,7 @@ public class SyncService
 
         try
         {
-            punches = provider.FetchNewAttendanceRecords();
+            punches = await Task.Run(() => provider.FetchNewAttendanceRecords(), ct);
         }
         catch (Exception ex)
         {
@@ -105,7 +105,7 @@ public class SyncService
 
         int sent = 0, queued = 0, skipped = 0;
 
-   
+
         foreach (var p in punches)
         {
             if (_lastProcessed.TryGetValue(p.EnrollNumber, out var last) &&

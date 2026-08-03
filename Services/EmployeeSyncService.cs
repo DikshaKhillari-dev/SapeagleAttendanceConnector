@@ -42,7 +42,10 @@ public class EmployeeSyncService
         StatusChanged?.Invoke($"{deviceLabel}: Connecting...");
         var provider = MachineFactory.Create(machine, machineNumber, _checkpointService);
 
-        if (!provider.Connect())
+ 
+        bool connected = await Task.Run(() => provider.Connect(), ct);
+
+        if (!connected)
         {
             Logger.Log($"[EmployeeSync] {deviceLabel}: connect failed.");
             StatusChanged?.Invoke($"{deviceLabel}: connect failed.");
@@ -51,7 +54,7 @@ public class EmployeeSyncService
         }
 
         StatusChanged?.Invoke($"{deviceLabel}: Reading existing employees...");
-        var machineEmployees = provider.ReadExistingEmployees();
+        var machineEmployees = await Task.Run(() => provider.ReadExistingEmployees(), ct);
 
         StatusChanged?.Invoke($"{deviceLabel}: Fetching employees from ERP...");
         var erpEmployees = await _apiService.GetEmployeesForSyncAsync(machine.ComId, null, ct);

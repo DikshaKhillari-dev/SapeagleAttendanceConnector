@@ -10,6 +10,7 @@ public class DashboardForm : Form
     private readonly ConfigService _configService;
     private readonly SyncService _syncService;
     private readonly EmployeeSyncService _employeeSyncService;
+    private readonly CheckpointService _checkpointService;
 
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 60000 };
     private readonly NotifyIcon _trayIcon;
@@ -40,19 +41,25 @@ public class DashboardForm : Form
     private readonly Button _btnSyncEmployees = new() { Text = "Sync Employees" };
     private readonly Button _btnMapUsers = new() { Text = "Map Users" };
     private readonly Button _btnExit = new() { Text = "Exit" };
+    // Reset Checkpoint button intentionally hidden from the UI (kept out of layout/tray menu
+    // below) - resetting a checkpoint forces the next sync to re-read a device's old backlog,
+    // which re-inserts already-synced records as duplicates. RunResetCheckpointAsync() is kept
+    // in the code below, unused, in case a support workflow needs it again later.
 
     public DashboardForm(
-        CompanyConfig company,
-        ApiService apiService,
-        ConfigService configService,
-        SyncService syncService,
-        EmployeeSyncService employeeSyncService)
+    CompanyConfig company,
+    ApiService apiService,
+    ConfigService configService,
+    SyncService syncService,
+    EmployeeSyncService employeeSyncService,
+    CheckpointService checkpointService)
     {
         _company = company;
         _apiService = apiService;
         _configService = configService;
         _syncService = syncService;
         _employeeSyncService = employeeSyncService;
+        _checkpointService = checkpointService;
 
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoScaleDimensions = new SizeF(96F, 96F);
@@ -117,7 +124,7 @@ public class DashboardForm : Form
         _lblLastSync.Text = "Last sync : —";
 
         _timer.Tick += async (_, _) => await RunSyncAsync();
-        Load += async (_, _) => { _timer.Start(); await RunSyncAsync(); };
+        Load += async (_, _) => { await FastForwardCheckpointsOnceAsync(); _timer.Start(); await RunSyncAsync(); };
     }
 
     private Panel BuildBody()
@@ -146,7 +153,7 @@ public class DashboardForm : Form
 
         Theme.StylePrimaryButton(_btnSyncNow);
         Theme.StylePrimaryButton(_btnSyncEmployees);
-        Theme.StyleSecondaryButton(_btnMapUsers);   
+        Theme.StyleSecondaryButton(_btnMapUsers);
         Theme.StyleSecondaryButton(_btnExit);
         foreach (var b in new[] { _btnSyncNow, _btnSyncEmployees, _btnMapUsers, _btnExit })
             Theme.ApplyRoundedCorners(b, 8);
@@ -371,6 +378,87 @@ public class DashboardForm : Form
             _btnMapUsers.Enabled = true;
         }
     }
+
+    /// <summary>
+    /// Runs once, ever, on this machine. As of this update, whatever backlog exists on
+    /// each activated device has already been synced (and any duplicates already cleaned
+    /// up in the database) - so every activated device's checkpoint is fast-forwarded to
+    /// "now" here, meaning the very next sync only pulls punches that happen after this
+    /// moment instead of re-reading the device's old backlog and creating duplicates again.
+    /// A marker file makes sure this only ever runs the first time the app starts after
+    /// this update; later runs are no-ops.
+    /// </summary>
+    private async Task FastForwardCheckpointsOnceAsync()
+    {
+        var dataDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "SapeagleAttendanceConnector", "Data");
+        Directory.CreateDirectory(dataDir);
+        var flagPath = Path.Combine(dataDir, "checkpoint-fastforward-applied.flag");
+        if (File.Exists(flagPath)) return;
+
+        foreach (var m in _company.Machines)
+        {
+            try
+            {
+                var mc = await _apiService.GetMachineAsync(m.MachineId);
+                if (mc == null)
+                {
+                    Logger.Log($"[Checkpoint] FastForward: MachineId={m.MachineId} - GetMachineAsync returned null, skipped.");
+                    continue;
+                }
+
+                var deviceKey = $"{mc.MachineType}:{mc.IpAddress}:{mc.DeviceId}";
+                _checkpointService.MarkSyncedUpToNow(deviceKey);
+                Logger.Log($"[Checkpoint] FastForward: '{mc.MachineName}' ({deviceKey}) checkpoint set to now - " +
+                           "next sync will only fetch punches after this moment.");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[Checkpoint] FastForward: failed for MachineId={m.MachineId} - {ex.Message}");
+            }
+        }
+
+        File.WriteAllText(flagPath, $"Applied at {DateTime.Now:O}");
+    }
+
+    private async Task RunResetCheckpointAsync()
+    {
+        var machines = new List<MachineConfig>();
+        foreach (var m in _company.Machines)
+        {
+            var mc = await _apiService.GetMachineAsync(m.MachineId);
+            if (mc != null) machines.Add(mc);
+        }
+
+        if (machines.Count == 0)
+        {
+            MessageBox.Show(this, "No activated machines found.", "Reset Checkpoint",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        using var picker = new MachinePickerDialog(machines);
+        if (picker.ShowDialog(this) != DialogResult.OK || picker.SelectedMachine == null)
+            return;
+
+        var machine = picker.SelectedMachine;
+        var deviceKey = $"{machine.MachineType}:{machine.IpAddress}:{machine.DeviceId}";
+
+        var confirm = MessageBox.Show(this,
+            $"'{machine.MachineName}' ka sync checkpoint reset karoge?\n\n" +
+            "Agla sync is device ke saare purane logs dobara fetch karega — " +
+            "sirf tab karo jab pichla synced data database se already delete ho chuka ho, " +
+            "warna duplicate records ban sakte hain.",
+            "Reset Checkpoint", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+
+        if (confirm != DialogResult.Yes) return;
+
+        _checkpointService.ResetCheckpoint(deviceKey);
+        MessageBox.Show(this, $"Checkpoint reset ho gaya '{machine.MachineName}' ke liye.",
+            "Reset Checkpoint", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
 
     private void PositionConnectionBadge()
     {
