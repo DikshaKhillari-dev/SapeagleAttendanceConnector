@@ -9,6 +9,9 @@ public class MachineConfig
     public string IpAddress { get; set; } = "";
     public int Port { get; set; } = 4370;
     public string Password { get; set; } = "";
-    public string MachineType { get; set; } = "ZKTeco"; 
+
+    public string Username { get; set; } = "";
+
+    public string MachineType { get; set; } = "ZKTeco";
     public bool IsActive { get; set; }
 }

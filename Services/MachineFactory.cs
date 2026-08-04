@@ -1,5 +1,6 @@
 using SapeagleAttendanceConnector.Models;
 using SapeagleAttendanceConnector.SBXPC;
+using SapeagleAttendanceConnector.Hikvision;
 
 namespace SapeagleAttendanceConnector.Services;
 
@@ -22,6 +23,10 @@ public static class MachineFactory
                 machine.IpAddress, machine.Port, machineNumber,
                 int.TryParse(machine.Password, out var pw) ? pw : 0,
                 checkpoint),
+
+            "HIKVISION" => new HikvisionProvider(
+                machine.IpAddress, machine.Port, machine.Username, machine.Password,
+                machineNumber, checkpoint),
 
             _ => throw new NotSupportedException($"Unknown MachineType '{machine.MachineType}'")
         };
