@@ -22,7 +22,7 @@ public class HikvisionProvider : IAttendanceProvider
     public HikvisionProvider(string ip, int port, string username, string password, int machineNumber, CheckpointService checkpoint)
     {
         _ip = ip;
-        _port = port > 0 ? port : 8000; 
+        _port = port > 0 ? port : 8000;
         _username = string.IsNullOrWhiteSpace(username) ? "admin" : username;
         _password = password;
         _checkpoint = checkpoint;
@@ -38,7 +38,7 @@ public class HikvisionProvider : IAttendanceProvider
         {
             if (_sdkInitialized) return;
             HCNetSDKNative.NET_DVR_Init();
-            try { HCNetSDKNative.NET_DVR_SetLogToFile(3, "./SdkLog/", true); } catch {  }
+            try { HCNetSDKNative.NET_DVR_SetLogToFile(3, "./SdkLog/", true); } catch { }
             _sdkInitialized = true;
         }
     }
@@ -53,7 +53,7 @@ public class HikvisionProvider : IAttendanceProvider
             wPort = (ushort)_port,
             sUserName = _username,
             sPassword = _password,
-            byLoginMode = 0,   
+            byLoginMode = 0,
             byUseTransport = 0,
             bUseAsynLogin = false,
             byRes3 = new byte[119]
@@ -78,100 +78,91 @@ public class HikvisionProvider : IAttendanceProvider
         finally { _connected = false; _userId = -1; }
     }
 
+    // Fetches attendance punches via the ISAPI "AcsEvent" search (POST /ISAPI/AccessControl/AcsEvent?format=json)
+    // instead of the legacy binary NET_DVR_StartRemoteConfig(NET_DVR_GET_ACS_EVENT) call. On this device
+    // (DS-K1T320EFWX) the legacy binary command consistently returns NET_DVR_PARAMETER_ERROR (17) even with a
+    // byte-correct NET_DVR_ACS_EVENT_COND struct, whereas the ISAPI channel (already used for employee sync)
+    // works once called with POST + a CRLF-terminated request line. Per HCNetSDK docs (E.6 / F.2 / F.3), this
+    // reuses the same CallIsapi plumbing.
     public List<AttendancePunch> FetchNewAttendanceRecords()
     {
         var records = new List<AttendancePunch>();
         if (!_connected && !Connect()) return records;
 
         var lastSynced = _checkpoint.GetLastSynced(_deviceKey);
-
         var startTime = lastSynced == DateTime.MinValue ? DateTime.Now.AddDays(-30) : lastSynced;
         var endTime = DateTime.Now;
 
-        var cond = new HCNetSDKNative.NET_DVR_ACS_EVENT_COND();
-        cond.Init();
-        cond.dwSize = (uint)Marshal.SizeOf(cond);
-        cond.dwMajor = 0;  
-        cond.dwMinor = 0;   
-        cond.byPicEnable = 0; 
-        cond.wInductiveEventType = 65535;
-        cond.struStartTime = ToNetDvrTime(startTime);
-        cond.struEndTime = ToNetDvrTime(endTime);
-
-        int handle = -1;
-        IntPtr ptrCond = IntPtr.Zero;
-
         try
         {
-            uint size = cond.dwSize;
-            ptrCond = Marshal.AllocHGlobal((int)size);
-            Marshal.StructureToPtr(cond, ptrCond, false);
-
-            handle = HCNetSDKNative.NET_DVR_StartRemoteConfig(
-                _userId, HCNetSDKNative.NET_DVR_GET_ACS_EVENT, ptrCond, (int)size, null, IntPtr.Zero);
-
-            if (handle == -1)
-            {
-                Logger.Log($"[Hikvision] StartRemoteConfig failed ErrorCode={HCNetSDKNative.NET_DVR_GetLastError()}");
-                return records;
-            }
-
-            var cfg = new HCNetSDKNative.NET_DVR_ACS_EVENT_CFG();
-            cfg.Init();
-            cfg.dwSize = (uint)Marshal.SizeOf(cfg);
-            int outSize = (int)cfg.dwSize;
-
-            bool more = true;
+            int position = 0;
+            const int pageSize = 30;
+            string searchId = Guid.NewGuid().ToString("N")[..16];
             var seen = new List<AttendancePunch>();
+            bool more = true;
 
             while (more)
             {
-                int status = HCNetSDKNative.NET_DVR_GetNextRemoteConfig(handle, ref cfg, outSize);
-                switch (status)
+                string body = System.Text.Json.JsonSerializer.Serialize(new
                 {
-                    case HCNetSDKNative.NET_SDK_GET_NEXT_STATUS_SUCCESS:
-                        if (HCNetSDKNative.SuccessMinorCodes.Contains(cfg.dwMinor))
-                        {
-                            string enrollNumber = ExtractEmployeeNo(cfg.struAcsEventInfo);
-                            if (!string.IsNullOrEmpty(enrollNumber))
-                            {
-                                seen.Add(new AttendancePunch
-                                {
-                                    EnrollNumber = enrollNumber,
-                                    VerifyMode = (int)cfg.dwMinor,
-                                   
-                                    InOutMode = 2,
-                                    Timestamp = FromNetDvrTime(cfg.struTime)
-                                });
-                            }
-                        }
-                       
-                        cfg = new HCNetSDKNative.NET_DVR_ACS_EVENT_CFG();
-                        cfg.Init();
-                        cfg.dwSize = (uint)Marshal.SizeOf(cfg);
-                        break;
+                    AcsEventCond = new
+                    {
+                        searchID = searchId,
+                        searchResultPosition = position,
+                        maxResults = pageSize,
+                        major = 0,
+                        minor = 0,
+                        startTime = ToIsoWithOffset(startTime),
+                        endTime = ToIsoWithOffset(endTime)
+                    }
+                });
 
-                    case HCNetSDKNative.NET_SDK_GET_NEXT_STATUS_NEED_WAIT:
-                        Thread.Sleep(150);
-                        break;
-
-                    case HCNetSDKNative.NET_SDK_GET_NEXT_STATUS_FINISH:
-                        more = false;
-                        break;
-
-                    case HCNetSDKNative.NET_SDK_GET_NEXT_STATUS_FAILED:
-                    default:
-                        Logger.Log($"[Hikvision] GetNextRemoteConfig status={status} ErrorCode={HCNetSDKNative.NET_DVR_GetLastError()}");
-                        more = false;
-                        break;
+                var (ok, response, statusCode) = CallIsapi("POST /ISAPI/AccessControl/AcsEvent?format=json", body);
+                if (!ok)
+                {
+                    Logger.Log($"[Hikvision] AcsEvent search failed at position={position}, StatusCode={statusCode}, Response={response}");
+                    break;
                 }
+
+                using var doc = System.Text.Json.JsonDocument.Parse(response);
+                var root = doc.RootElement.GetProperty("AcsEvent");
+                int numOfMatches = root.TryGetProperty("numOfMatches", out var nm) ? nm.GetInt32() : 0;
+                int totalMatches = root.TryGetProperty("totalMatches", out var tm) ? tm.GetInt32() : 0;
+
+                if (root.TryGetProperty("InfoList", out var infoList) &&
+                    infoList.ValueKind == System.Text.Json.JsonValueKind.Array)
+                {
+                    foreach (var ev in infoList.EnumerateArray())
+                    {
+                        int minor = ev.TryGetProperty("minor", out var mn) ? mn.GetInt32() : 0;
+                        if (!HCNetSDKNative.SuccessMinorCodes.Contains((uint)minor)) continue;
+
+                        string enrollNumber = ev.TryGetProperty("employeeNoString", out var eno) ? (eno.GetString() ?? "") : "";
+                        string timeStr = ev.TryGetProperty("time", out var t) ? (t.GetString() ?? "") : "";
+                        if (string.IsNullOrEmpty(enrollNumber) || string.IsNullOrEmpty(timeStr)) continue;
+
+                        if (DateTimeOffset.TryParse(timeStr, out var dto))
+                        {
+                            seen.Add(new AttendancePunch
+                            {
+                                EnrollNumber = enrollNumber,
+                                VerifyMode = minor,
+                                InOutMode = 2,
+                                Timestamp = dto.LocalDateTime
+                            });
+                        }
+                    }
+                }
+
+                position += numOfMatches;
+                if (numOfMatches == 0 || position >= totalMatches) more = false;
             }
 
             records = seen.Where(r => r.Timestamp > lastSynced)
                            .OrderBy(r => r.Timestamp)
                            .ToList();
 
-            Logger.Log($"[Hikvision] Device returned {seen.Count} verify-success event(s), " +
+            Logger.Log($"[Hikvision] AcsEvent returned {seen.Count} verify-success event(s), " +
                        $"{records.Count} new since checkpoint {lastSynced:yyyy-MM-dd HH:mm:ss}.");
 
             if (records.Count > 0)
@@ -182,56 +173,264 @@ public class HikvisionProvider : IAttendanceProvider
             Logger.Log($"[Hikvision] Fetch error: {ex.Message}");
             _connected = false;
         }
-        finally
-        {
-            if (handle != -1) HCNetSDKNative.NET_DVR_StopRemoteConfig(handle);
-            if (ptrCond != IntPtr.Zero) Marshal.FreeHGlobal(ptrCond);
-        }
 
         return records;
     }
-    private static string ExtractEmployeeNo(HCNetSDKNative.NET_DVR_ACS_EVENT_DETAIL detail)
+
+    // Hikvision's ISAPI time fields want ISO-8601 with a UTC offset, e.g. "2026-08-07T14:01:39+05:30".
+    private static string ToIsoWithOffset(DateTime dt)
     {
-        if (detail.byEmployeeNo != null)
-        {
-            string fromBytes = Encoding.ASCII.GetString(detail.byEmployeeNo).TrimEnd('\0').Trim();
-            if (!string.IsNullOrEmpty(fromBytes)) return fromBytes;
-        }
-        return detail.dwEmployeeNo > 0 ? detail.dwEmployeeNo.ToString() : "";
+        var withOffset = new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Local));
+        return withOffset.ToString("yyyy-MM-ddTHH:mm:sszzz");
     }
 
-    private static HCNetSDKNative.NET_DVR_TIME ToNetDvrTime(DateTime dt) => new()
+    // ---- ISAPI (AccessControl/UserInfo) over the authenticated NET_DVR session ----
+    // Hikvision face terminals manage users through the device's ISAPI HTTP layer, not the
+    // legacy attendance-log calls above. NET_DVR_STDXMLConfig lets us send an ISAPI request
+    // ("METHOD /path?format=json" + a JSON body) through the SDK session we already logged
+    // into with Connect(), so we don't need a separate HTTP client with digest auth.
+    private (bool Ok, string Response, int StatusCode) CallIsapi(string requestLine, string? jsonBody = null)
     {
-        dwYear = dt.Year,
-        dwMonth = dt.Month,
-        dwDay = dt.Day,
-        dwHour = dt.Hour,
-        dwMinute = dt.Minute,
-        dwSecond = dt.Second
-    };
+        if (!_connected && !Connect()) return (false, "", 0);
 
-    private static DateTime FromNetDvrTime(HCNetSDKNative.NET_DVR_TIME t)
+        const int OutBufferSize = 1024 * 1024; // 1MB is plenty for UserInfo JSON responses
+        const int StatusBufferSize = 4096;
+
+        // The device's ISAPI request-line parser requires a CRLF terminator (every official
+        // Hikvision demo builds it as "METHOD /path\r\n"). Without it the device can't match
+        // the route and replies with NET_DVR_NOSUPPORT even though the endpoint exists.
+        string terminatedRequestLine = requestLine.EndsWith("\r\n") ? requestLine : requestLine + "\r\n";
+
+        byte[] urlBytes = Encoding.ASCII.GetBytes(terminatedRequestLine);
+        byte[]? inBytes = jsonBody != null ? Encoding.UTF8.GetBytes(jsonBody) : null;
+
+        IntPtr urlPtr = Marshal.AllocHGlobal(urlBytes.Length);
+        IntPtr inPtr = IntPtr.Zero;
+        IntPtr outPtr = Marshal.AllocHGlobal(OutBufferSize);
+        IntPtr statusPtr = Marshal.AllocHGlobal(StatusBufferSize);
+
+        try
+        {
+            Marshal.Copy(urlBytes, 0, urlPtr, urlBytes.Length);
+            if (inBytes != null)
+            {
+                inPtr = Marshal.AllocHGlobal(inBytes.Length);
+                Marshal.Copy(inBytes, 0, inPtr, inBytes.Length);
+            }
+
+            var input = new HCNetSDKNative.NET_DVR_XML_CONFIG_INPUT();
+            input.Init();
+            input.dwSize = (uint)Marshal.SizeOf(input);
+            input.lpRequestUrl = urlPtr;
+            input.dwRequestUrlLen = (uint)urlBytes.Length;
+            input.lpInBuffer = inPtr;
+            input.dwInBufferSize = inBytes != null ? (uint)inBytes.Length : 0;
+            input.dwRecvTimeOut = 5000;
+            input.dwSendTimeOut = 5000;
+            input.byForceEncrpt = 0;
+            input.byNumOfMultiPart = 0;
+            input.byMIMEType = 0; // 0 = json
+
+            // lpOutBuffer/dwOutBufferSize/lpStatusBuffer/dwStatusSize belong on the OUTPUT
+            // struct, not INPUT — the device SDK reads them from here.
+            var output = new HCNetSDKNative.NET_DVR_XML_CONFIG_OUTPUT();
+            output.Init();
+            output.dwSize = (uint)Marshal.SizeOf(output);
+            output.lpOutBuffer = outPtr;
+            output.dwOutBufferSize = OutBufferSize;
+            output.lpStatusBuffer = statusPtr;
+            output.dwStatusSize = StatusBufferSize;
+
+            bool ok = HCNetSDKNative.NET_DVR_STDXMLConfig(_userId, ref input, ref output);
+            if (!ok)
+            {
+                Logger.Log($"[Hikvision] ISAPI {requestLine} failed ErrorCode={HCNetSDKNative.NET_DVR_GetLastError()}");
+                return (false, "", 0);
+            }
+
+            int respLen = (int)output.dwReturnSize;
+            byte[] respBytes = new byte[respLen];
+            if (respLen > 0) Marshal.Copy(outPtr, respBytes, 0, respLen);
+            string response = Encoding.UTF8.GetString(respBytes);
+
+            byte[] statusBytes = new byte[StatusBufferSize];
+            Marshal.Copy(statusPtr, statusBytes, 0, StatusBufferSize);
+            string statusText = Encoding.UTF8.GetString(statusBytes).TrimEnd('\0');
+            int statusCode = ExtractStatusCode(statusText);
+
+            return (true, response, statusCode);
+        }
+        catch (Exception ex)
+        {
+            Logger.Log($"[Hikvision] ISAPI {requestLine} exception: {ex.Message}");
+            return (false, "", 0);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(urlPtr);
+            if (inPtr != IntPtr.Zero) Marshal.FreeHGlobal(inPtr);
+            Marshal.FreeHGlobal(outPtr);
+            Marshal.FreeHGlobal(statusPtr);
+        }
+    }
+
+    // The status buffer holds a small fragment like {"statusCode":1,"statusString":"OK",...} —
+    // statusCode == 1 means the device accepted the request.
+    private static int ExtractStatusCode(string statusText)
     {
-        try { return new DateTime(t.dwYear, t.dwMonth, t.dwDay, t.dwHour, t.dwMinute, t.dwSecond); }
-        catch { return DateTime.Now; }
+        var match = System.Text.RegularExpressions.Regex.Match(statusText, "statusCode[\">:]+(\\d+)");
+        return match.Success ? int.Parse(match.Groups[1].Value) : -1;
+    }
+
+    // Some ISAPI operations (UserInfo/Record, UserInfo/Delete) return status directly in the
+    // response BODY as {"statusCode":1,...} instead of the separate NET_DVR status buffer, which
+    // this device firmware leaves empty on POST/PUT (buffer-derived statusCode == -1). Prefer the
+    // buffer status when it's actually populated; otherwise fall back to the body's statusCode.
+    private static int ExtractBodyStatusCode(string response, int bufferStatusCode)
+    {
+        if (bufferStatusCode != -1) return bufferStatusCode;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(response);
+            if (doc.RootElement.TryGetProperty("statusCode", out var sc))
+                return sc.GetInt32();
+        }
+        catch { }
+        return bufferStatusCode;
     }
 
     public List<Models.MachineEmployee> ReadExistingEmployees()
     {
-        Logger.Log("[Hikvision] ReadExistingEmployees: not implemented yet (needs ISAPI UserInfo/Search — see comment in HikvisionProvider.cs).");
-        return new List<Models.MachineEmployee>();
+        var employees = new List<Models.MachineEmployee>();
+        if (!_connected && !Connect()) return employees;
+
+        try
+        {
+            int position = 0;
+            const int pageSize = 30; // Hikvision recommends <=30 per UserInfo/Search page
+            string searchId = Guid.NewGuid().ToString("N")[..16];
+
+            while (true)
+            {
+                string body = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    UserInfoSearchCond = new
+                    {
+                        searchID = searchId,
+                        searchResultPosition = position,
+                        maxResults = pageSize
+                    }
+                });
+
+                // Per Hikvision's Person-Based Access Control SDK guide (E.168), Search is POST, not PUT.
+                var (ok, response, statusCode) = CallIsapi("POST /ISAPI/AccessControl/UserInfo/Search?format=json", body);
+                if (!ok)
+                {
+                    Logger.Log($"[Hikvision] ReadExistingEmployees: search failed at position={position}, StatusCode={statusCode}, Response={response}");
+                    break;
+                }
+
+                using var doc = System.Text.Json.JsonDocument.Parse(response);
+                var root = doc.RootElement.GetProperty("UserInfoSearch");
+                int numOfMatches = root.TryGetProperty("numOfMatches", out var nm) ? nm.GetInt32() : 0;
+                int totalMatches = root.TryGetProperty("totalMatches", out var tm) ? tm.GetInt32() : 0;
+
+                if (root.TryGetProperty("UserInfo", out var userInfoArray) &&
+                    userInfoArray.ValueKind == System.Text.Json.JsonValueKind.Array)
+                {
+                    foreach (var u in userInfoArray.EnumerateArray())
+                    {
+                        string empNo = u.TryGetProperty("employeeNo", out var eno) ? (eno.GetString() ?? "") : "";
+                        string name = u.TryGetProperty("name", out var nn) ? (nn.GetString() ?? "") : "";
+                        if (!string.IsNullOrEmpty(empNo))
+                            employees.Add(new Models.MachineEmployee { EnrollNumber = empNo, Name = name });
+                    }
+                }
+
+                position += numOfMatches;
+                if (numOfMatches == 0 || position >= totalMatches) break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Log($"[Hikvision] ReadExistingEmployees error: {ex.Message}");
+        }
+
+        Logger.Log($"[Hikvision] ReadExistingEmployees found {employees.Count} employee(s) on machine.");
+        return employees;
     }
 
     public bool CreateEmployee(string enrollNumber, string employeeName, string? fallbackNumericId = null)
     {
-        Logger.Log($"[Hikvision] CreateEmployee({enrollNumber}): not implemented yet — face terminals need a photo enrolled at the device anyway.");
-        return false;
+        if (!_connected && !Connect()) return false;
+
+        try
+        {
+            string body = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                UserInfo = new
+                {
+                    employeeNo = enrollNumber,
+                    name = employeeName,
+                    userType = "normal",
+                    Valid = new
+                    {
+                        enable = true,
+                        beginTime = "2020-01-01T00:00:00",
+                        endTime = "2037-12-31T23:59:59",
+                        timeType = "local"
+                    },
+                    doorRight = "1",
+                    RightPlan = new[] { new { doorNo = 1, planTemplateNo = "1" } }
+                }
+            });
+
+            // Per Hikvision's Person-Based Access Control SDK guide (E.167), Record (add person) is POST, not PUT.
+            var (ok, response, statusCode) = CallIsapi("POST /ISAPI/AccessControl/UserInfo/Record?format=json", body);
+            bool created = ok && ExtractBodyStatusCode(response, statusCode) == 1;
+
+            Logger.Log(created
+                ? $"[Hikvision] CreateEmployee EnrollNumber={enrollNumber} Name={employeeName} -> success (user record only — no face photo enrolled)"
+                : $"[Hikvision] CreateEmployee EnrollNumber={enrollNumber} failed. StatusCode={statusCode} Response={response}");
+
+            return created;
+        }
+        catch (Exception ex)
+        {
+            Logger.Log($"[Hikvision] CreateEmployee error: {ex.Message}");
+            return false;
+        }
     }
 
     public bool DeleteEmployee(string enrollNumber)
     {
-        Logger.Log($"[Hikvision] DeleteEmployee({enrollNumber}): not implemented yet (needs ISAPI UserInfo/Delete).");
-        return false;
+        if (!_connected && !Connect()) return false;
+
+        try
+        {
+            string body = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                UserInfoDetail = new
+                {
+                    mode = "byEmployeeNo",
+                    EmployeeNoList = new[] { new { employeeNo = enrollNumber } }
+                }
+            });
+
+            var (ok, response, statusCode) = CallIsapi("PUT /ISAPI/AccessControl/UserInfo/Delete?format=json", body);
+            bool deleted = ok && ExtractBodyStatusCode(response, statusCode) == 1;
+
+            Logger.Log(deleted
+                ? $"[Hikvision] DeleteEmployee EnrollNumber={enrollNumber} -> success"
+                : $"[Hikvision] DeleteEmployee EnrollNumber={enrollNumber} failed. StatusCode={statusCode} Response={response}");
+
+            return deleted;
+        }
+        catch (Exception ex)
+        {
+            Logger.Log($"[Hikvision] DeleteEmployee error: {ex.Message}");
+            return false;
+        }
     }
 
     public void Dispose() => Disconnect();

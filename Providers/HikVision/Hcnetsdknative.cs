@@ -22,7 +22,7 @@ internal static class HCNetSDKNative
     public const int NET_SDK_GET_NEXT_STATUS_FINISH = 1002;
     public const int NET_SDK_GET_NEXT_STATUS_FAILED = 1003;
 
-   
+
     public static readonly HashSet<uint> SuccessMinorCodes = new()
     {
         0x10, // MINOR_MULTI_VERIFY_SUCCESS
@@ -158,11 +158,11 @@ internal static class HCNetSDKNative
         public byte[] byCardNo;
         [MarshalAs(UnmanagedType.ByValArray, SizeConst = MAX_NAMELEN, ArraySubType = UnmanagedType.I1)]
         public byte[] byName;
-        public uint dwBeginSerialNo;
         public byte byPicEnable;
         public byte byTimeType;
         [MarshalAs(UnmanagedType.ByValArray, SizeConst = 2, ArraySubType = UnmanagedType.I1)]
         public byte[] byRes2;
+        public uint dwBeginSerialNo;
         public uint dwEndSerialNo;
         public uint dwIOTChannelNo;
         public ushort wInductiveEventType;
@@ -271,6 +271,53 @@ internal static class HCNetSDKNative
 
     public delegate void RemoteConfigCallback(uint dwType, IntPtr lpBuffer, uint dwBufLen, IntPtr pUserData);
 
+    // Lets us issue ISAPI-style requests (e.g. "PUT /ISAPI/AccessControl/UserInfo/Record?format=json")
+    // over the already-authenticated NET_DVR session, so employee create/read/delete don't need a
+    // separate HTTP digest-auth client.
+    // Matches tagNET_DVR_XML_CONFIG_INPUT in HCNetSDK.h exactly. Note: the request/in buffers
+    // live here, but the OUT buffer and STATUS buffer are NOT part of this struct — they belong
+    // to NET_DVR_XML_CONFIG_OUTPUT below. (Previous version of this struct incorrectly folded
+    // lpOutBuffer/dwOutBufferSize/lpStatusBuffer/dwStatusSize into INPUT, which desynced every
+    // field after them and made the SDK reject the whole call with NET_DVR_PARAMETER_ERROR.)
+    [StructLayout(LayoutKind.Sequential)]
+    public struct NET_DVR_XML_CONFIG_INPUT
+    {
+        public uint dwSize;
+        public IntPtr lpRequestUrl;
+        public uint dwRequestUrlLen;
+        public IntPtr lpInBuffer;
+        public uint dwInBufferSize;
+        public uint dwRecvTimeOut;
+        public byte byForceEncrpt;
+        public byte byNumOfMultiPart;
+        public byte byMIMEType;
+        public byte byRes1;
+        public uint dwSendTimeOut;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 24)]
+        public byte[] byRes;
+
+        public void Init() => byRes = new byte[24];
+    }
+
+    // Matches tagNET_DVR_XML_CONFIG_OUTPUT in HCNetSDK.h exactly (64-bit layout — lpDataBuffer
+    // is a pointer with no extra padding bytes on win64/posix64 builds).
+    [StructLayout(LayoutKind.Sequential)]
+    public struct NET_DVR_XML_CONFIG_OUTPUT
+    {
+        public uint dwSize;
+        public IntPtr lpOutBuffer;
+        public uint dwOutBufferSize;
+        public uint dwReturnSize; // dwReturnedXMLSize
+        public IntPtr lpStatusBuffer;
+        public uint dwStatusSize;
+        public IntPtr lpDataBuffer;
+        public byte byNumOfMultiPart;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 23)]
+        public byte[] byRes;
+
+        public void Init() => byRes = new byte[23];
+    }
+
     [DllImport(Dll)] public static extern bool NET_DVR_Init();
     [DllImport(Dll)] public static extern bool NET_DVR_Cleanup();
     [DllImport(Dll)] public static extern uint NET_DVR_GetLastError();
@@ -288,4 +335,7 @@ internal static class HCNetSDKNative
 
     [DllImport(Dll)]
     public static extern bool NET_DVR_StopRemoteConfig(int lHandle);
+
+    [DllImport(Dll)]
+    public static extern bool NET_DVR_STDXMLConfig(int lUserID, ref NET_DVR_XML_CONFIG_INPUT lpInputParam, ref NET_DVR_XML_CONFIG_OUTPUT lpOutputParam);
 }
