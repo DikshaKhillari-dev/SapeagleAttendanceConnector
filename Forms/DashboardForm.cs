@@ -124,7 +124,7 @@ public class DashboardForm : Form
         _lblLastSync.Text = "Last sync : —";
 
         _timer.Tick += async (_, _) => await RunSyncAsync();
-        Load += async (_, _) => { await FastForwardCheckpointsOnceAsync(); _timer.Start(); await RunSyncAsync(); };
+        Load += async (_, _) => { _timer.Start(); await RunSyncAsync(); };
     }
 
     private Panel BuildBody()
@@ -227,6 +227,7 @@ public class DashboardForm : Form
 
     private async Task RunEmployeeSyncAsync()
     {
+        _timer.Stop();
         _btnSyncEmployees.Enabled = false;
         try
         {
@@ -311,11 +312,13 @@ public class DashboardForm : Form
         finally
         {
             _btnSyncEmployees.Enabled = true;
+            _timer.Start();
         }
     }
 
     private async Task RunMapUsersAsync()
     {
+        _timer.Stop();
         _btnMapUsers.Enabled = false;
         try
         {
@@ -376,6 +379,7 @@ public class DashboardForm : Form
         finally
         {
             _btnMapUsers.Enabled = true;
+            _timer.Start();
         }
     }
 
@@ -408,7 +412,7 @@ public class DashboardForm : Form
                     continue;
                 }
 
-                var deviceKey = $"{mc.MachineType}:{mc.IpAddress}:{mc.DeviceId}";
+                var deviceKey = $"{mc.MachineType}:{mc.Id}";
                 _checkpointService.MarkSyncedUpToNow(deviceKey);
                 Logger.Log($"[Checkpoint] FastForward: '{mc.MachineName}' ({deviceKey}) checkpoint set to now - " +
                            "next sync will only fetch punches after this moment.");
@@ -443,7 +447,7 @@ public class DashboardForm : Form
             return;
 
         var machine = picker.SelectedMachine;
-        var deviceKey = $"{machine.MachineType}:{machine.IpAddress}:{machine.DeviceId}";
+        var deviceKey = $"{machine.MachineType}:{machine.Id}";
 
         var confirm = MessageBox.Show(this,
             $"'{machine.MachineName}' ka sync checkpoint reset karoge?\n\n" +

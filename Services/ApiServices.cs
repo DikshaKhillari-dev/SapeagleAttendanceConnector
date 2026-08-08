@@ -81,6 +81,44 @@ public class ApiService
         }
     }
 
+    /// <summary>
+    /// Asks the ERP database what the latest attendance record already saved for this
+    /// machine is. Used only as a fallback to seed a local checkpoint when this connector
+    /// install has no local checkpoint yet for the device (fresh install, checkpoints.json
+    /// lost, etc.) — so it never blindly re-reads a device's full backlog and creates
+    /// duplicates in the ERP.
+    /// </summary>
+    public async Task<DateTime?> GetLastSyncedTimestampAsync(int comId, int machineId, CancellationToken ct = default)
+    {
+        try
+        {
+            var resp = await _http.GetAsync($"/api/attendance/last-synced-timestamp?comId={comId}&machineId={machineId}", ct);
+            var body = await resp.Content.ReadAsStringAsync(ct);
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                Logger.Log($"[Api] GetLastSyncedTimestampAsync: ComId={comId} MachineId={machineId} -> HTTP {(int)resp.StatusCode} {resp.StatusCode}. Body: {body}");
+                return null;
+            }
+
+            using var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.TryGetProperty("lastSyncedTimestamp", out var el) && el.ValueKind != JsonValueKind.Null)
+            {
+                var ts = el.GetDateTime();
+                Logger.Log($"[Api] GetLastSyncedTimestampAsync: ComId={comId} MachineId={machineId} -> {ts:yyyy-MM-dd HH:mm:ss}");
+                return ts;
+            }
+
+            Logger.Log($"[Api] GetLastSyncedTimestampAsync: ComId={comId} MachineId={machineId} -> no prior record in ERP DB.");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            Logger.Log($"[Api] GetLastSyncedTimestampAsync: exception for ComId={comId} MachineId={machineId}: {ex.Message}");
+            return null;
+        }
+    }
+
     public async Task<MachineConfig?> GetMachineAsync(int machineId, CancellationToken ct = default)
     {
         try
@@ -148,11 +186,11 @@ public class ApiService
 
     private Task<(HttpResponseMessage resp, string body)> SendCheckInAsync(long empId, AttendanceLog punch, CancellationToken ct)
         => PostAndReadAsync("/api/attendance/check-in",
-            new { EmpId = empId, ComId = punch.ComId, Device = punch.DeviceLabel, AttendanceImage = (string?)null, PunchTime = punch.Timestamp }, ct);
+            new { EmpId = empId, ComId = punch.ComId, MachineId = punch.MachineId, Device = punch.DeviceLabel, AttendanceImage = (string?)null, PunchTime = punch.Timestamp }, ct);
 
     private Task<(HttpResponseMessage resp, string body)> SendCheckOutAsync(long empId, AttendanceLog punch, CancellationToken ct)
         => PostAndReadAsync($"/api/attendance/check-out/{empId}",
-            new { Device = punch.DeviceLabel, PunchTime = punch.Timestamp }, ct);
+            new { MachineId = punch.MachineId, Device = punch.DeviceLabel, PunchTime = punch.Timestamp }, ct);
 
     public async Task<bool> SendManualAttendanceAsync(AttendanceLog punch, CancellationToken ct = default)
     {
@@ -209,7 +247,8 @@ public class ApiService
             EmpId = empId,
             AttendanceType = attendanceType,
             AttendanceDate = punch.Timestamp.Date,
-            AttendanceTime = punch.Timestamp.TimeOfDay
+            AttendanceTime = punch.Timestamp.TimeOfDay,
+            MachineId = punch.MachineId
         }, ct);
 
     private static bool LooksLikeNoActiveCheckInForDate(System.Net.HttpStatusCode status, string body)

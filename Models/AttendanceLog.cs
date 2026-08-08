@@ -4,6 +4,7 @@ public class AttendanceLog
 {
     public Guid Id { get; set; } = Guid.NewGuid();
     public int ComId { get; set; }
+    public int MachineId { get; set; }
     public string DeviceLabel { get; set; } = "";
     public string EnrollNumber { get; set; } = "";
     public int VerifyMode { get; set; }

@@ -230,4 +230,26 @@ internal static class SBXPCNative
                 anyDeleted = true;
         return anyDeleted;
     }
+
+    [DllImport(Dll64, EntryPoint = "_GetLastError", CallingConvention = CallingConvention.Winapi)]
+    static extern byte _GetLastError_64(int machineNo, IntPtr errorCode);
+
+    public static bool GetLastError(int machineNo, out int errorCode)
+    {
+        errorCode = 0;
+        byte[] buf = new byte[4];
+        GCHandle h = GCHandle.Alloc(buf, GCHandleType.Pinned);
+        try
+        {
+            byte ret = _GetLastError_64(machineNo, h.AddrOfPinnedObject());
+            errorCode = BitConverter.ToInt32(buf, 0);
+            return ret > 0;
+        }
+        finally { h.Free(); }
+    }
+
+    [DllImport(Dll64, EntryPoint = "_EnableDevice", CallingConvention = CallingConvention.Winapi)]
+    static extern byte _EnableDevice_64(int machineNo, byte flag);
+
+    public static bool EnableDevice(int machineNo, byte flag) => _EnableDevice_64(machineNo, flag) > 0;
 }

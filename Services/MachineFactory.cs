@@ -17,16 +17,18 @@ public static class MachineFactory
             "ZKTECO" => new ZKTecoProvider(
                 machine.IpAddress, machine.Port, machineNumber,
                 int.TryParse(machine.Password, out var zkpw) ? zkpw : 0,
+                machine.Id,
                 checkpoint),
 
             "SBXPC" => new SBXPCProvider(
                 machine.IpAddress, machine.Port, machineNumber,
                 int.TryParse(machine.Password, out var pw) ? pw : 0,
+                machine.Id,
                 checkpoint),
 
             "HIKVISION" => new HikvisionProvider(
                 machine.IpAddress, machine.Port, machine.Username, machine.Password,
-                machineNumber, checkpoint),
+                machineNumber, machine.Id, checkpoint),
 
             _ => throw new NotSupportedException($"Unknown MachineType '{machine.MachineType}'")
         };

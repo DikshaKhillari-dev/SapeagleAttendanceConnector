@@ -82,6 +82,29 @@ public class SyncService
         }
 
         string deviceLabel = $"{machine.MachineName} ({machine.IpAddress})";
+
+        // Safety net: if this connector install has no local checkpoint for this device yet
+        // (fresh install, checkpoints.json lost/corrupted, machine re-activated, etc.), do NOT
+        // let the provider fall back to "sync everything since the beginning of time". Ask the
+        // ERP database what the last record actually saved for this machine was, and seed the
+        // local checkpoint from that first. UpdateLastSynced only ever moves forward, so this is
+        // always safe to call — it's a no-op if a real checkpoint already exists locally.
+        if (_checkpointService.GetLastSynced(provider.DeviceKey) == DateTime.MinValue)
+        {
+            var dbLastSynced = await _apiService.GetLastSyncedTimestampAsync(machine.ComId, machine.Id, ct);
+            if (dbLastSynced.HasValue)
+            {
+                _checkpointService.UpdateLastSynced(provider.DeviceKey, dbLastSynced.Value);
+                Logger.Log($"[Sync] {deviceLabel}: no local checkpoint found — seeded from ERP DB's last synced record " +
+                           $"({dbLastSynced.Value:yyyy-MM-dd HH:mm:ss}) instead of replaying full device backlog.");
+            }
+            else
+            {
+                Logger.Log($"[Sync] {deviceLabel}: no local checkpoint and no prior ERP record found for this machine — " +
+                           "this looks like a genuinely new device, proceeding with a full first-time sync.");
+            }
+        }
+
         List<AttendancePunch> punches;
 
         try
@@ -121,6 +144,7 @@ public class SyncService
             var log = new AttendanceLog
             {
                 ComId = machine.ComId,
+                MachineId = machine.Id,
                 DeviceLabel = deviceLabel,
                 EnrollNumber = p.EnrollNumber,
                 VerifyMode = p.VerifyMode,

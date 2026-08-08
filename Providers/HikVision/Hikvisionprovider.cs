@@ -19,14 +19,18 @@ public class HikvisionProvider : IAttendanceProvider
     private int _userId = -1;
     private bool _connected;
 
-    public HikvisionProvider(string ip, int port, string username, string password, int machineNumber, CheckpointService checkpoint)
+    public string DeviceKey => _deviceKey;
+
+    public HikvisionProvider(string ip, int port, string username, string password, int machineNumber, int machineConfigId, CheckpointService checkpoint)
     {
         _ip = ip;
         _port = port > 0 ? port : 8000;
         _username = string.IsNullOrWhiteSpace(username) ? "admin" : username;
         _password = password;
         _checkpoint = checkpoint;
-        _deviceKey = $"Hikvision:{ip}:{machineNumber}";
+        // Keyed on the ERP machine's stable primary key, not IP — IP can change (DHCP,
+        // reactivation) without the checkpoint being lost.
+        _deviceKey = $"Hikvision:{machineConfigId}";
 
         EnsureSdkInitialized();
     }
@@ -143,11 +147,19 @@ public class HikvisionProvider : IAttendanceProvider
 
                         if (DateTimeOffset.TryParse(timeStr, out var dto))
                         {
+                            string attStatus = ev.TryGetProperty("attendanceStatus", out var asEl) ? (asEl.GetString() ?? "") : "";
+                            int inOutMode = attStatus switch
+                            {
+                                "checkIn" => 0,
+                                "checkOut" => 1,
+                                _ => 2   
+                            };
+
                             seen.Add(new AttendancePunch
                             {
                                 EnrollNumber = enrollNumber,
                                 VerifyMode = minor,
-                                InOutMode = 2,
+                                InOutMode = inOutMode,
                                 Timestamp = dto.LocalDateTime
                             });
                         }

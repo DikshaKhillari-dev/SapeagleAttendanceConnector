@@ -14,14 +14,18 @@ public class ZKTecoProvider : IAttendanceProvider
     private dynamic? _device;
     private bool _isConnected;
 
-    public ZKTecoProvider(string deviceIp, int port, int machineNumber, int commPassword, CheckpointService checkpoint)
+    public string DeviceKey => _deviceKey;
+
+    public ZKTecoProvider(string deviceIp, int port, int machineNumber, int commPassword, int machineConfigId, CheckpointService checkpoint)
     {
         _deviceIp = deviceIp;
         _port = port;
         _machineNumber = machineNumber;
         _commPassword = commPassword;
         _checkpoint = checkpoint;
-        _deviceKey = $"ZKTeco:{deviceIp}:{machineNumber}";
+        // Keyed on the ERP machine's stable primary key, not IP — IP can change (DHCP,
+        // reactivation) without the checkpoint being lost.
+        _deviceKey = $"ZKTeco:{machineConfigId}";
     }
 
     public bool Connect()

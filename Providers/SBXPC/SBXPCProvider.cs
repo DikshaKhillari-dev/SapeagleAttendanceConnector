@@ -12,11 +12,15 @@ public class SBXPCProvider : IAttendanceProvider
     private readonly CheckpointService _checkpoint;
     private bool _connected;
 
-    public SBXPCProvider(string ip, int port, int machineNumber, int password, CheckpointService checkpoint)
+    public string DeviceKey => _deviceKey;
+
+    public SBXPCProvider(string ip, int port, int machineNumber, int password, int machineConfigId, CheckpointService checkpoint)
     {
         _ip = ip; _port = port; _machineNumber = machineNumber; _password = password;
         _checkpoint = checkpoint;
-        _deviceKey = $"SBXPC:{ip}:{machineNumber}";
+        // Keyed on the ERP machine's stable primary key, not IP — IP can change (DHCP,
+        // reactivation) without the checkpoint being lost.
+        _deviceKey = $"SBXPC:{machineConfigId}";
     }
 
     public bool Connect()
@@ -44,9 +48,14 @@ public class SBXPCProvider : IAttendanceProvider
         try
         {
 
+            SBXPCNative.EnableDevice(_machineNumber, 0);
+
             if (!SBXPCNative.ReadAllGLogData(_machineNumber))
             {
-                Logger.Log($"[SBXPC] ReadAllGLogData returned false for MachineNumber={_machineNumber}");
+                SBXPCNative.GetLastError(_machineNumber, out int errCode);
+                Logger.Log($"[SBXPC] ReadAllGLogData failed for MachineNumber={_machineNumber}, ErrorCode={errCode}");
+                _connected = false;
+                SBXPCNative.EnableDevice(_machineNumber, 1);
                 return records;
             }
 
@@ -80,6 +89,7 @@ public class SBXPCProvider : IAttendanceProvider
 
             if (records.Count > 0)
                 _checkpoint.UpdateLastSynced(_deviceKey, records.Max(r => r.Timestamp));
+            SBXPCNative.EnableDevice(_machineNumber, 1);
         }
         catch (Exception ex)
         {
