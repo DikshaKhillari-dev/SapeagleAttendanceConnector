@@ -229,6 +229,9 @@ public class DashboardForm : Form
     {
         _timer.Stop();
         _btnSyncEmployees.Enabled = false;
+        // Wait for any auto-sync cycle already in flight to finish before touching the
+        // device — the SBXPC connection is not safe to use from two threads at once.
+        await _syncService.DeviceLock.WaitAsync();
         try
         {
             if (_company.Machines.Count == 0)
@@ -311,6 +314,7 @@ public class DashboardForm : Form
         }
         finally
         {
+            _syncService.DeviceLock.Release();
             _btnSyncEmployees.Enabled = true;
             _timer.Start();
         }
@@ -320,6 +324,9 @@ public class DashboardForm : Form
     {
         _timer.Stop();
         _btnMapUsers.Enabled = false;
+        // Same reasoning as RunEmployeeSyncAsync: don't let this run concurrently with an
+        // in-flight auto-sync cycle on the same device connection.
+        await _syncService.DeviceLock.WaitAsync();
         try
         {
             if (_company.Machines.Count == 0)
@@ -378,6 +385,7 @@ public class DashboardForm : Form
         }
         finally
         {
+            _syncService.DeviceLock.Release();
             _btnMapUsers.Enabled = true;
             _timer.Start();
         }

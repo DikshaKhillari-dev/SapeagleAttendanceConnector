@@ -15,6 +15,14 @@ public class SyncService
 
     private readonly Dictionary<(string EnrollNumber, DateTime Date), bool> _backlogSessionOpen = new();
 
+    // Guards against auto-sync (timer tick) and manual actions (Map Users / Employee Sync)
+    // touching the same physical device connection concurrently. The SBXPC OCX is only
+    // documented as thread-safe across *different* machine numbers, not for two threads
+    // hitting the same machine number at once (see SBXPC manual, section 6). Concurrent
+    // access there is what was causing the sporadic "connect failed" and app crashes when
+    // Map Users / Sync Employees was clicked while an auto-sync cycle was still in flight.
+    public readonly SemaphoreSlim DeviceLock = new(1, 1);
+
     public event Action<string>? StatusChanged;
     public DateTime? LastSyncTime { get; private set; }
     public int PunchesToday { get; private set; }
@@ -54,7 +62,9 @@ public class SyncService
             Logger.Log($"[Sync] MachineId={machineId}: fetched '{machine.MachineName}' DeviceId(raw)='{machine.DeviceId}' " +
                        $"MachineType='{machine.MachineType}' Ip={machine.IpAddress}:{machine.Port} IsActive={machine.IsActive}");
 
-            await SyncMachineAsync(machine, ct);
+            await DeviceLock.WaitAsync(ct);
+            try { await SyncMachineAsync(machine, ct); }
+            finally { DeviceLock.Release(); }
         }
 
         LastSyncTime = DateTime.Now;
@@ -162,13 +172,22 @@ public class SyncService
             {
                 var sessionKey = (p.EnrollNumber, p.Timestamp.Date);
                 bool sessionOpen = _backlogSessionOpen.TryGetValue(sessionKey, out var open) && open;
-                log.AttendanceType = sessionOpen ? "PunchOut" : "PunchIn";
+
+                // Trust the device's own InOutMode tag (0=IN, 1=OUT) when it's unambiguous —
+                // it survives app restarts, unlike the in-memory sessionOpen guess below, which
+                // is kept only as a fallback for devices/records that report an ambiguous mode (2).
+                log.AttendanceType = p.InOutMode switch
+                {
+                    0 => "PunchIn",
+                    1 => "PunchOut",
+                    _ => sessionOpen ? "PunchOut" : "PunchIn"
+                };
 
                 ok = await _apiService.SendManualAttendanceAsync(log, ct);
                 Logger.Log($"[Sync] Punch EnrollNumber={p.EnrollNumber} Date={p.Timestamp:yyyy-MM-dd} Time={p.Timestamp:HH:mm:ss} " +
-                           $"(backlog, AttendanceType={log.AttendanceType}) -> SendManualAttendanceAsync result={ok}");
+                           $"(backlog, InOutMode={p.InOutMode}, AttendanceType={log.AttendanceType}) -> SendManualAttendanceAsync result={ok}");
 
-                if (ok) _backlogSessionOpen[sessionKey] = !sessionOpen;
+                if (ok) _backlogSessionOpen[sessionKey] = log.AttendanceType == "PunchIn";
             }
 
             if (ok)
