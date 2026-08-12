@@ -152,7 +152,7 @@ public class HikvisionProvider : IAttendanceProvider
                             {
                                 "checkIn" => 0,
                                 "checkOut" => 1,
-                                _ => 2   
+                                _ => 2
                             };
 
                             seen.Add(new AttendancePunch
@@ -265,6 +265,14 @@ public class HikvisionProvider : IAttendanceProvider
             if (respLen > 0) Marshal.Copy(outPtr, respBytes, 0, respLen);
             string response = Encoding.UTF8.GetString(respBytes);
 
+            // This device firmware prefixes JSON response bodies with a UTF-8 BOM (EF BB BF).
+            // Encoding.UTF8.GetString does not strip it — it decodes to a literal U+FEFF character
+            // at the start of the string. System.Text.Json.JsonDocument.Parse then throws on that
+            // leading BOM (it's not valid JSON whitespace), which ExtractBodyStatusCode's catch{}
+            // swallowed silently, making genuinely successful Create/Delete responses (statusCode:1
+            // in the body) look like failures. Strip it before anyone tries to parse the body.
+            response = response.TrimStart('\uFEFF');
+
             byte[] statusBytes = new byte[StatusBufferSize];
             Marshal.Copy(statusPtr, statusBytes, 0, StatusBufferSize);
             string statusText = Encoding.UTF8.GetString(statusBytes).TrimEnd('\0');
@@ -303,7 +311,7 @@ public class HikvisionProvider : IAttendanceProvider
         if (bufferStatusCode != -1) return bufferStatusCode;
         try
         {
-            using var doc = System.Text.Json.JsonDocument.Parse(response);
+            using var doc = System.Text.Json.JsonDocument.Parse(response.TrimStart('\uFEFF').Trim());
             if (doc.RootElement.TryGetProperty("statusCode", out var sc))
                 return sc.GetInt32();
         }
@@ -420,11 +428,15 @@ public class HikvisionProvider : IAttendanceProvider
 
         try
         {
+            // Per Hikvision's Person-Based Access Control SDK guide (E.165), the request body for
+            // PUT /ISAPI/AccessControl/UserInfo/Delete must be JSON_UserInfoDelCond (F.167) —
+            // { "UserInfoDelCond": { "EmployeeNoList": [...] } } — NOT JSON_UserInfoDetail (F.168),
+            // which belongs to the separate UserInfoDetail/Delete (card+fingerprint, async) endpoint.
+            // Sending the wrong wrapper here made the device reject every delete request.
             string body = System.Text.Json.JsonSerializer.Serialize(new
             {
-                UserInfoDetail = new
+                UserInfoDelCond = new
                 {
-                    mode = "byEmployeeNo",
                     EmployeeNoList = new[] { new { employeeNo = enrollNumber } }
                 }
             });

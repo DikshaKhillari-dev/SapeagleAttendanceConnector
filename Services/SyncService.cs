@@ -173,9 +173,11 @@ public class SyncService
                 var sessionKey = (p.EnrollNumber, p.Timestamp.Date);
                 bool sessionOpen = _backlogSessionOpen.TryGetValue(sessionKey, out var open) && open;
 
-                // Trust the device's own InOutMode tag (0=IN, 1=OUT) when it's unambiguous —
-                // it survives app restarts, unlike the in-memory sessionOpen guess below, which
-                // is kept only as a fallback for devices/records that report an ambiguous mode (2).
+                // Trust the device's own attendanceStatus tag (InOutMode: 0=checkIn, 1=checkOut)
+                // when it's known — same as the live path already does. Only fall back to guessing
+                // from alternating order when the device itself sent an ambiguous/untagged event
+                // (InOutMode==2), so a genuinely-tagged checkOut never gets mislabeled as a PunchIn
+                // just because of in-memory toggle drift (e.g. after a connector restart).
                 log.AttendanceType = p.InOutMode switch
                 {
                     0 => "PunchIn",
@@ -187,6 +189,9 @@ public class SyncService
                 Logger.Log($"[Sync] Punch EnrollNumber={p.EnrollNumber} Date={p.Timestamp:yyyy-MM-dd} Time={p.Timestamp:HH:mm:ss} " +
                            $"(backlog, InOutMode={p.InOutMode}, AttendanceType={log.AttendanceType}) -> SendManualAttendanceAsync result={ok}");
 
+                // Keep the toggle in sync with whatever type was actually sent (device-tagged or
+                // guessed), so a later ambiguous punch for the same employee/date still alternates
+                // from the correct state instead of the pre-restart guess.
                 if (ok) _backlogSessionOpen[sessionKey] = log.AttendanceType == "PunchIn";
             }
 
