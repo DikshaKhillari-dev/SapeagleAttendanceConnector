@@ -15,6 +15,24 @@ public class ActivationResult
     public string MachineName { get; set; } = "";
 }
 
+/// <summary>
+/// Result of attempting to deliver an attendance record to the ERP, classified as either a
+/// success, a transient failure (worth retrying — 5xx, timeout, connection/network errors),
+/// or a permanent failure (business/validation error that will never succeed on retry, e.g.
+/// employee not found or a 4xx rejection). QueueService uses this classification to decide
+/// whether to retry with backoff or move the record straight to Failed/DeadLetter.
+/// </summary>
+public class SendOutcome
+{
+    public bool Success { get; init; }
+    public bool IsTransient { get; init; }
+    public string? ErrorMessage { get; init; }
+
+    public static SendOutcome Ok() => new() { Success = true };
+    public static SendOutcome Transient(string message) => new() { Success = false, IsTransient = true, ErrorMessage = message };
+    public static SendOutcome Permanent(string message) => new() { Success = false, IsTransient = false, ErrorMessage = message };
+}
+
 public class ApiService
 {
     private readonly HttpClient _http;
@@ -138,13 +156,14 @@ public class ApiService
         }
     }
 
-    public async Task<bool> SendPunchAsync(AttendanceLog punch, CancellationToken ct = default)
+    public async Task<SendOutcome> SendPunchAsync(AttendanceLog punch, CancellationToken ct = default)
     {
         long empId = await ResolveEmpIdAsync(punch.ComId, punch.EnrollNumber, ct);
         if (empId == 0)
         {
-            Logger.Log($"[Api] SendPunchAsync: could not resolve EmpId for EnrollNumber='{punch.EnrollNumber}' ComId={punch.ComId} — employee not matched, punch NOT sent.");
-            return false;
+            var msg = $"Employee not found/mapped for EnrollNumber='{punch.EnrollNumber}' ComId={punch.ComId}.";
+            Logger.Log($"[Api] SendPunchAsync: {msg} Punch NOT sent.");
+            return SendOutcome.Permanent(msg);
         }
 
         try
@@ -159,29 +178,52 @@ public class ApiService
             Logger.Log($"[Api] SendPunchAsync: EmpId={empId} InOutMode={punch.InOutMode} -> HTTP {(int)resp.StatusCode} {resp.StatusCode}. Response: {body}");
 
             if (resp.IsSuccessStatusCode)
-                return true;
+                return SendOutcome.Ok();
 
-            if (ambiguous && LooksLikeAlreadyCheckedIn(resp.StatusCode, body))
+            // NOTE: this must fire whenever we tried Check-In first (InOutMode==0 OR
+            // ambiguous), not only when ambiguous. Some SBXPC devices (e.g. S100/SB2900)
+            // never populate the attendanceStatus byte, so every punch — including genuine
+            // check-outs — decodes as InOutMode==0. Without this branch those punches would
+            // hit "already checked in" and be dropped/duplicated instead of closing the day.
+            if (tryCheckInFirst && LooksLikeAlreadyCheckedIn(resp.StatusCode, body))
             {
                 var (resp2, body2) = await SendCheckOutAsync(empId, punch, ct);
                 Logger.Log($"[Api] SendPunchAsync: retry as Check-Out for EmpId={empId} -> HTTP {(int)resp2.StatusCode} {resp2.StatusCode}. Response: {body2}");
-                return resp2.IsSuccessStatusCode;
+                return resp2.IsSuccessStatusCode
+                    ? SendOutcome.Ok()
+                    : Classify(resp2.StatusCode, $"Check-out retry failed: HTTP {(int)resp2.StatusCode} {resp2.StatusCode}. {body2}");
             }
 
             if (!ambiguous && punch.InOutMode != 0 && LooksLikeNoOpenCheckIn(resp.StatusCode, body))
             {
                 var (resp2, body2) = await SendCheckInAsync(empId, punch, ct);
                 Logger.Log($"[Api] SendPunchAsync: retry as Check-In for EmpId={empId} -> HTTP {(int)resp2.StatusCode} {resp2.StatusCode}. Response: {body2}");
-                return resp2.IsSuccessStatusCode;
+                return resp2.IsSuccessStatusCode
+                    ? SendOutcome.Ok()
+                    : Classify(resp2.StatusCode, $"Check-in retry failed: HTTP {(int)resp2.StatusCode} {resp2.StatusCode}. {body2}");
             }
 
-            return false;
+            return Classify(resp.StatusCode, $"HTTP {(int)resp.StatusCode} {resp.StatusCode}. {body}");
         }
         catch (Exception ex)
         {
             Logger.Log($"[Api] SendPunchAsync: exception calling ERP API for EmpId={empId}: {ex.Message}");
-            return false;
+            return SendOutcome.Transient(ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Classifies an unsuccessful HTTP response as transient (worth retrying — 5xx, 429) or
+    /// permanent (4xx business/validation errors that will never succeed on retry).
+    /// </summary>
+    private static SendOutcome Classify(System.Net.HttpStatusCode status, string message)
+        => IsTransientStatus(status) ? SendOutcome.Transient(message) : SendOutcome.Permanent(message);
+
+    private static bool IsTransientStatus(System.Net.HttpStatusCode status)
+    {
+        int code = (int)status;
+        // 5xx: server-side/transient errors. 429: rate limiting, also worth retrying later.
+        return code >= 500 || code == 429;
     }
 
     private Task<(HttpResponseMessage resp, string body)> SendCheckInAsync(long empId, AttendanceLog punch, CancellationToken ct)
@@ -192,13 +234,14 @@ public class ApiService
         => PostAndReadAsync($"/api/attendance/check-out/{empId}",
             new { MachineId = punch.MachineId, Device = punch.DeviceLabel, PunchTime = punch.Timestamp }, ct);
 
-    public async Task<bool> SendManualAttendanceAsync(AttendanceLog punch, CancellationToken ct = default)
+    public async Task<SendOutcome> SendManualAttendanceAsync(AttendanceLog punch, CancellationToken ct = default)
     {
         long empId = await ResolveEmpIdAsync(punch.ComId, punch.EnrollNumber, ct);
         if (empId == 0)
         {
-            Logger.Log($"[Api] SendManualAttendanceAsync: could not resolve EmpId for EnrollNumber='{punch.EnrollNumber}' ComId={punch.ComId} — employee not matched, punch NOT sent.");
-            return false;
+            var msg = $"Employee not found/mapped for EnrollNumber='{punch.EnrollNumber}' ComId={punch.ComId}.";
+            Logger.Log($"[Api] SendManualAttendanceAsync: {msg} Punch NOT sent.");
+            return SendOutcome.Permanent(msg);
         }
 
         var attendanceType = string.IsNullOrEmpty(punch.AttendanceType) ? "PunchIn" : punch.AttendanceType;
@@ -211,7 +254,7 @@ public class ApiService
                        $"Date={punch.Timestamp:yyyy-MM-dd} Time={punch.Timestamp:HH:mm:ss} -> HTTP {(int)resp.StatusCode} {resp.StatusCode}. Response: {body}");
 
             if (resp.IsSuccessStatusCode)
-                return true;
+                return SendOutcome.Ok();
 
             // Our own per-(employee, date) open/closed tracking is in-memory only, so a
             // connector restart mid-backlog-sync (or any drift) can leave it out of step with
@@ -222,22 +265,26 @@ public class ApiService
             {
                 var (resp2, body2) = await PostManualAttendanceAsync(empId, punch, "PunchOut", ct);
                 Logger.Log($"[Api] SendManualAttendanceAsync: retry as PunchOut for EmpId={empId} Date={punch.Timestamp:yyyy-MM-dd} -> HTTP {(int)resp2.StatusCode} {resp2.StatusCode}. Response: {body2}");
-                return resp2.IsSuccessStatusCode;
+                return resp2.IsSuccessStatusCode
+                    ? SendOutcome.Ok()
+                    : Classify(resp2.StatusCode, $"PunchOut retry failed: HTTP {(int)resp2.StatusCode} {resp2.StatusCode}. {body2}");
             }
 
             if (attendanceType == "PunchOut" && LooksLikeNoActiveCheckInForDate(resp.StatusCode, body))
             {
                 var (resp2, body2) = await PostManualAttendanceAsync(empId, punch, "PunchIn", ct);
                 Logger.Log($"[Api] SendManualAttendanceAsync: retry as PunchIn for EmpId={empId} Date={punch.Timestamp:yyyy-MM-dd} -> HTTP {(int)resp2.StatusCode} {resp2.StatusCode}. Response: {body2}");
-                return resp2.IsSuccessStatusCode;
+                return resp2.IsSuccessStatusCode
+                    ? SendOutcome.Ok()
+                    : Classify(resp2.StatusCode, $"PunchIn retry failed: HTTP {(int)resp2.StatusCode} {resp2.StatusCode}. {body2}");
             }
 
-            return false;
+            return Classify(resp.StatusCode, $"HTTP {(int)resp.StatusCode} {resp.StatusCode}. {body}");
         }
         catch (Exception ex)
         {
             Logger.Log($"[Api] SendManualAttendanceAsync: exception calling ERP API for EmpId={empId}: {ex.Message}");
-            return false;
+            return SendOutcome.Transient(ex.Message);
         }
     }
 

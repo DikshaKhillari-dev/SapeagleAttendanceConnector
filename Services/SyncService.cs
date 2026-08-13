@@ -9,11 +9,22 @@ public class SyncService
     private readonly CheckpointService _checkpointService;
     private readonly Dictionary<int, IAttendanceProvider> _deviceProviders = new();
 
-    private readonly Dictionary<string, DateTime> _lastProcessed = new();
-    private static readonly TimeSpan DedupWindow = TimeSpan.FromSeconds(60);
+    // Keyed on (DeviceKey, EnrollNumber, Date) so the same EnrollNumber on two different
+    // machines can never affect each other's PunchIn/PunchOut toggle state — see "MACHINE
+    // ISOLATION". DeviceKey already carries the machine's stable identity (MachineConfig.Id).
+    private readonly Dictionary<(string DeviceKey, string EnrollNumber, DateTime Date), bool> _backlogSessionOpen = new();
 
+    /// <summary>
+    /// Maximum number of previously-queued (older) backlog records processed per sync cycle,
+    /// after this cycle's freshly read live punches have already been sent. Keeps a large
+    /// backlog from ever delaying a brand-new punch — see "LIVE PUNCH MUST HAVE PRIORITY".
+    /// Configurable; default chosen to keep a single cycle fast even with a large backlog.
+    /// </summary>
+    public int MaxBacklogBatchPerCycle { get; set; } = 50;
 
-    private readonly Dictionary<(string EnrollNumber, DateTime Date), bool> _backlogSessionOpen = new();
+    /// <summary>Maximum retry attempts for a transient failure before a record is moved to
+    /// Failed/DeadLetter. Configurable — see "QUEUE RETRY — NO INFINITE RETRY".</summary>
+    public int MaxRetryCount { get; set; } = QueueService.DefaultMaxRetryCount;
 
     // Guards against auto-sync (timer tick) and manual actions (Map Users / Employee Sync)
     // touching the same physical device connection concurrently. The SBXPC OCX is only
@@ -38,7 +49,6 @@ public class SyncService
     public async Task RunCycleAsync(List<int> machineIds, CancellationToken ct = default)
     {
         Logger.Log($"[Sync] RunCycleAsync started for {machineIds.Count} machine(s). MachineIds=[{string.Join(", ", machineIds)}]");
-        await FlushQueueAsync(ct);
 
         if (machineIds.Count == 0)
         {
@@ -47,6 +57,8 @@ public class SyncService
             return;
         }
 
+        // Read new device punches FIRST and get them sent, before touching any older backlog —
+        // a large backlog must never block a live punch. See "LIVE PUNCH MUST HAVE PRIORITY".
         foreach (var machineId in machineIds)
         {
             if (ct.IsCancellationRequested) break;
@@ -66,6 +78,10 @@ public class SyncService
             try { await SyncMachineAsync(machine, ct); }
             finally { DeviceLock.Release(); }
         }
+
+        // Only now process a bounded batch of older, previously-queued backlog records (from
+        // this or earlier cycles) that are due for a retry.
+        await ProcessBacklogBatchAsync(ct);
 
         LastSyncTime = DateTime.Now;
         Logger.Log("[Sync] RunCycleAsync completed.");
@@ -136,23 +152,20 @@ public class SyncService
             return;
         }
 
-        int sent = 0, queued = 0, skipped = 0;
+        // ---- DURABLY PERSIST every new punch BEFORE the checkpoint is allowed to advance ----
+        // This is the fix for the most critical bug: previously the checkpoint advanced right
+        // after the device read, so a crash between read and send permanently lost the punch.
+        // Now the checkpoint only ever advances up to the last punch that has actually reached
+        // durable storage (queue.json), regardless of whether it has been sent yet.
+        var newlyPersisted = new List<AttendanceLog>();
+        DateTime? maxDurablyStoredTimestamp = null;
 
-
-        foreach (var p in punches)
+        foreach (var p in punches) // punches are already ordered ascending by Timestamp
         {
-            if (_lastProcessed.TryGetValue(p.EnrollNumber, out var last) &&
-                p.Timestamp >= last && p.Timestamp - last < DedupWindow)
-            {
-                Logger.Log($"[Sync] Punch EnrollNumber={p.EnrollNumber} Time={p.Timestamp:HH:mm:ss} " +
-                           $"skipped - only {(p.Timestamp - last).TotalSeconds:F0}s since last processed punch " +
-                           $"({last:HH:mm:ss}), treated as duplicate/backlog-replay.");
-                skipped++;
-                continue;
-            }
-
             var log = new AttendanceLog
             {
+                EventId = p.EventId,
+                DeviceKey = provider.DeviceKey,
                 ComId = machine.ComId,
                 MachineId = machine.Id,
                 DeviceLabel = deviceLabel,
@@ -162,22 +175,18 @@ public class SyncService
                 Timestamp = p.Timestamp
             };
 
-            bool ok;
-            if (p.Timestamp.Date == DateTime.Today)
+            if (p.Timestamp.Date != DateTime.Today)
             {
-                ok = await _apiService.SendPunchAsync(log, ct);
-                Logger.Log($"[Sync] Punch EnrollNumber={p.EnrollNumber} Time={p.Timestamp:HH:mm:ss} InOutMode={p.InOutMode} (live) -> SendPunchAsync result={ok}");
-            }
-            else
-            {
-                var sessionKey = (p.EnrollNumber, p.Timestamp.Date);
-                bool sessionOpen = _backlogSessionOpen.TryGetValue(sessionKey, out var open) && open;
+                var sessionKey = (provider.DeviceKey, p.EnrollNumber, p.Timestamp.Date);
+
+                bool sessionOpen =
+                    _backlogSessionOpen.TryGetValue(sessionKey, out var open) && open;
 
                 // Trust the device's own attendanceStatus tag (InOutMode: 0=checkIn, 1=checkOut)
-                // when it's known — same as the live path already does. Only fall back to guessing
-                // from alternating order when the device itself sent an ambiguous/untagged event
-                // (InOutMode==2), so a genuinely-tagged checkOut never gets mislabeled as a PunchIn
-                // just because of in-memory toggle drift (e.g. after a connector restart).
+                // when it's known — same as the live path. Only fall back to guessing from
+                // alternating order when the device itself sent an ambiguous/untagged event
+                // (InOutMode==2), so a genuinely-tagged checkOut never gets mislabeled as a
+                // PunchIn just because of in-memory toggle drift (e.g. after a restart).
                 log.AttendanceType = p.InOutMode switch
                 {
                     0 => "PunchIn",
@@ -185,46 +194,123 @@ public class SyncService
                     _ => sessionOpen ? "PunchOut" : "PunchIn"
                 };
 
-                ok = await _apiService.SendManualAttendanceAsync(log, ct);
-                Logger.Log($"[Sync] Punch EnrollNumber={p.EnrollNumber} Date={p.Timestamp:yyyy-MM-dd} Time={p.Timestamp:HH:mm:ss} " +
-                           $"(backlog, InOutMode={p.InOutMode}, AttendanceType={log.AttendanceType}) -> SendManualAttendanceAsync result={ok}");
-
-                // Keep the toggle in sync with whatever type was actually sent (device-tagged or
-                // guessed), so a later ambiguous punch for the same employee/date still alternates
-                // from the correct state instead of the pre-restart guess.
-                if (ok) _backlogSessionOpen[sessionKey] = log.AttendanceType == "PunchIn";
+                // IMPORTANT:
+                // Update the state immediately after classifying this punch.
+                // The next punch of the same employee/date must see the
+                // updated IN/OUT state. Previously this update was deferred until
+                // after the API call succeeded, which meant two ambiguous (InOutMode=2)
+                // punches in the same batch could both read sessionOpen=false and both
+                // get classified as PunchIn.
+                _backlogSessionOpen[sessionKey] =
+                    log.AttendanceType == "PunchIn";
             }
 
-            if (ok)
+            bool stored = _queueService.TryPersist(log, out bool wasNew);
+
+            if (!stored)
             {
-                sent++;
-                if (p.Timestamp.Date == DateTime.Today) RegisterTodayPunch();
+                // Durable write itself failed (e.g. disk I/O). Stop here: do NOT advance the
+                // checkpoint past this point, and do NOT attempt to send this or any later
+                // punch in this batch — they will all be re-read from the device and retried
+                // next cycle, since the checkpoint hasn't moved past them.
+                Logger.Log($"[Sync] {deviceLabel}: failed to durably persist EventId={log.EventId} EnrollNumber={log.EnrollNumber} " +
+                           $"Time={log.Timestamp:yyyy-MM-dd HH:mm:ss} — stopping this cycle's batch here; checkpoint will not advance past it.");
+                break;
             }
-            else { queued++; _queueService.Enqueue(log); }
 
-            _lastProcessed[p.EnrollNumber] = p.Timestamp;
+            maxDurablyStoredTimestamp = log.Timestamp;
+
+            if (wasNew)
+            {
+                newlyPersisted.Add(log);
+            }
+            else
+            {
+                Logger.Log($"[Sync] EventId={log.EventId} EnrollNumber={log.EnrollNumber} Time={log.Timestamp:HH:mm:ss} " +
+                           "already durably stored from a previous cycle (re-read before checkpoint advanced) — " +
+                           "left for the backlog processor instead of being resent immediately.");
+            }
         }
 
-        Logger.Log($"[Sync] {deviceLabel}: {sent} sent, {queued} queued, {skipped} skipped as duplicate.");
-        StatusChanged?.Invoke($"{deviceLabel}: {sent} sent, {queued} queued, {skipped} skipped as duplicate.");
-    }
+        if (maxDurablyStoredTimestamp.HasValue)
+            _checkpointService.UpdateLastSynced(provider.DeviceKey, maxDurablyStoredTimestamp.Value);
 
-    private async Task FlushQueueAsync(CancellationToken ct)
-    {
-        var pending = _queueService.LoadAll();
-        if (pending.Count == 0) return;
+        // ---- Now process/send this cycle's freshly-persisted (live/current) punches ----
+        int sent = 0, queued = 0;
 
-        StatusChanged?.Invoke($"Syncing {pending.Count} pending record(s)...");
-
-        foreach (var log in pending)
+        foreach (var log in newlyPersisted)
         {
-            if (ct.IsCancellationRequested) break;
-
-            var ok = string.IsNullOrEmpty(log.AttendanceType)
+            var outcome = log.Timestamp.Date == DateTime.Today
                 ? await _apiService.SendPunchAsync(log, ct)
                 : await _apiService.SendManualAttendanceAsync(log, ct);
 
-            if (ok) _queueService.Remove(log.Id);
+            Logger.Log($"[Sync] Punch EnrollNumber={log.EnrollNumber} Time={log.Timestamp:yyyy-MM-dd HH:mm:ss} " +
+                       $"InOutMode={log.InOutMode} AttendanceType={log.AttendanceType ?? "(live)"} -> Success={outcome.Success}" +
+                       (outcome.Success ? "" : $" IsTransient={outcome.IsTransient} Error={outcome.ErrorMessage}"));
+
+            if (outcome.Success)
+            {
+                sent++;
+                _queueService.MarkSent(log.Id);
+                if (log.Timestamp.Date == DateTime.Today) RegisterTodayPunch();
+
+                // NOTE: _backlogSessionOpen is now updated at classification time only
+                // (see above, right after log.AttendanceType is set). Do NOT update it
+                // here again — waiting for the API response before updating the toggle
+                // state was the root cause of two ambiguous same-batch punches both
+                // being classified as PunchIn.
+            }
+            else
+            {
+                queued++;
+                _queueService.RecordFailure(log.Id, outcome.IsTransient, outcome.ErrorMessage, MaxRetryCount);
+            }
+        }
+
+        Logger.Log($"[Sync] {deviceLabel}: {sent} sent, {queued} queued for retry (of {newlyPersisted.Count} new punch(es); " +
+                   $"{punches.Count - newlyPersisted.Count} were already durably stored from a previous cycle).");
+        StatusChanged?.Invoke($"{deviceLabel}: {sent} sent, {queued} queued.");
+    }
+
+    /// <summary>
+    /// Processes a bounded batch of previously-queued backlog records that are due for a retry
+    /// (NextRetryAt null or in the past), oldest punch first, across all machines. Deliberately
+    /// runs only after every machine's live punches have already been read and sent this cycle.
+    /// </summary>
+    private async Task ProcessBacklogBatchAsync(CancellationToken ct)
+    {
+        var batch = _queueService.LoadDueBacklog(MaxBacklogBatchPerCycle);
+        if (batch.Count == 0) return;
+
+        int totalPending = _queueService.CountPending();
+        Logger.Log($"[Sync] ProcessBacklogBatchAsync: processing {batch.Count} of {totalPending} pending backlog record(s) due for retry.");
+        StatusChanged?.Invoke($"Processing {batch.Count} pending backlog record(s)...");
+
+        foreach (var log in batch)
+        {
+            if (ct.IsCancellationRequested) break;
+
+            var outcome = string.IsNullOrEmpty(log.AttendanceType)
+                ? await _apiService.SendPunchAsync(log, ct)
+                : await _apiService.SendManualAttendanceAsync(log, ct);
+
+            Logger.Log($"[Sync] Backlog EventId={log.EventId} EnrollNumber={log.EnrollNumber} Time={log.Timestamp:yyyy-MM-dd HH:mm:ss} -> Success={outcome.Success}" +
+                       (outcome.Success ? "" : $" IsTransient={outcome.IsTransient} Error={outcome.ErrorMessage}"));
+
+            if (outcome.Success)
+            {
+                _queueService.MarkSent(log.Id);
+                if (log.Timestamp.Date == DateTime.Today) RegisterTodayPunch();
+
+                // NOTE: _backlogSessionOpen is only ever updated at classification time
+                // (in SyncMachineAsync). This retry loop must NOT touch it — these records
+                // were already classified when first read, and re-touching the toggle here
+                // on a later retry would corrupt the state for punches read in between.
+            }
+            else
+            {
+                _queueService.RecordFailure(log.Id, outcome.IsTransient, outcome.ErrorMessage, MaxRetryCount);
+            }
         }
     }
 

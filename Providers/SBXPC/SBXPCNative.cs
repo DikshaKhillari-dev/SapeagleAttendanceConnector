@@ -36,9 +36,9 @@ internal static class SBXPCNative
         IntPtr verify, IntPtr yr, IntPtr mo, IntPtr dy, IntPtr hr, IntPtr mi, IntPtr sc);
 
     public static bool GetGeneralLogData(int machineNo, out int enrollNumber, out int verifyMode,
-        out int year, out int month, out int day, out int hour, out int minute)
+        out int year, out int month, out int day, out int hour, out int minute, out int second)
     {
-        enrollNumber = verifyMode = year = month = day = hour = minute = 0;
+        enrollNumber = verifyMode = year = month = day = hour = minute = second = 0;
 
         byte[] bTMc = new byte[4], bEnroll = new byte[4], bEMc = new byte[4], bVerify = new byte[4];
         byte[] bYear = new byte[4], bMonth = new byte[4], bDay = new byte[4];
@@ -72,6 +72,7 @@ internal static class SBXPCNative
                 day = BitConverter.ToInt32(bDay, 0);
                 hour = BitConverter.ToInt32(bHour, 0);
                 minute = BitConverter.ToInt32(bMinute, 0);
+                second = BitConverter.ToInt32(bSecond, 0);
             }
 
             return ret > 0;
@@ -88,9 +89,9 @@ internal static class SBXPCNative
         IntPtr verify, IntPtr yr, IntPtr mo, IntPtr dy, IntPtr hr, IntPtr mi, IntPtr sc);
 
     public static bool GetAllGLogData(int machineNo, out int enrollNumber, out int verifyMode,
-        out int year, out int month, out int day, out int hour, out int minute)
+        out int year, out int month, out int day, out int hour, out int minute, out int second)
     {
-        enrollNumber = verifyMode = year = month = day = hour = minute = 0;
+        enrollNumber = verifyMode = year = month = day = hour = minute = second = 0;
 
         byte[] bTMc = new byte[4], bEnroll = new byte[4], bEMc = new byte[4], bVerify = new byte[4];
         byte[] bYear = new byte[4], bMonth = new byte[4], bDay = new byte[4];
@@ -124,6 +125,7 @@ internal static class SBXPCNative
                 day = BitConverter.ToInt32(bDay, 0);
                 hour = BitConverter.ToInt32(bHour, 0);
                 minute = BitConverter.ToInt32(bMinute, 0);
+                second = BitConverter.ToInt32(bSecond, 0);
             }
 
             return ret > 0;

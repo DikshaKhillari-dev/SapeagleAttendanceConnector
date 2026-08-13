@@ -110,12 +110,14 @@ public class ZKTecoProvider : IAttendanceProvider
                        out int year, out int month, out int day,
                        out int hour, out int minute, out int second, out int workCode))
             {
+                var timestamp = new DateTime(year, month, day, hour, minute, second);
                 allRecords.Add(new AttendancePunch
                 {
                     EnrollNumber = enrollNumber,
                     VerifyMode = verifyMode,
                     InOutMode = inOutMode,
-                    Timestamp = new DateTime(year, month, day, hour, minute, second)
+                    Timestamp = timestamp,
+                    EventId = AttendanceIdentity.ComputeEventId(_deviceKey, enrollNumber, timestamp, verifyMode, inOutMode)
                 });
             }
 
@@ -132,8 +134,10 @@ public class ZKTecoProvider : IAttendanceProvider
             Logger.Log($"[ZKTeco] Device has {allRecords.Count} total record(s), " +
                        $"{records.Count} new since checkpoint {lastSynced:yyyy-MM-dd HH:mm:ss}.");
 
-            if (records.Count > 0)
-                _checkpoint.UpdateLastSynced(_deviceKey, records.Max(r => r.Timestamp));
+            // NOTE: the checkpoint is intentionally NOT advanced here — see SBXPCProvider for
+            // the full rationale. SyncService now advances it only after these records have
+            // been durably queued, so a crash between device-read and durable persistence can
+            // never cause a punch to be silently skipped on the next cycle.
         }
         catch (Exception ex)
         {

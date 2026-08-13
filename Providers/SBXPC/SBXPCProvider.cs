@@ -61,22 +61,65 @@ public class SBXPCProvider : IAttendanceProvider
 
             var allRecords = new List<AttendancePunch>();
             while (SBXPCNative.GetAllGLogData(_machineNumber, out int enroll, out int verify,
-                       out int y, out int mo, out int d, out int h, out int mi))
+                       out int y, out int mo, out int d, out int h, out int mi, out int sec))
             {
-                int attendanceStatus = (verify >> 8) & 0xFF;
-                int inOutMode = attendanceStatus switch
+                // dwVerifyMode is a packed value (see SBXPC manual, GetGeneralLogData):
+                //   Byte 0 (verify & 0xFF)        -> clocking mode, e.g. 51/52/53 = In
+                //                                     (FP/PWD/Card), 101/102/103 = Out,
+                //                                     151/152/153 = Extra.
+                //   Byte 1 ((verify >> 8) & 0xFF) -> attendance status (duty on/off,
+                //                                     overtime on/off, go in/out) — only
+                //                                     meaningful if the device's "duty
+                //                                     on/off" submenu has been configured.
+                //
+                // On this device Byte 1 is always 0 (that submenu was never set up), so
+                // relying on it alone made every punch resolve to "in" — evening punches
+                // included. Byte 0's In/Out/Extra clocking-mode value is checked first
+                // since it's what this device actually populates; Byte 1 is used as a
+                // secondary signal only when it carries something other than the
+                // ambiguous "0" (which means both "duty on" and "not populated").
+                int lowByte = verify & 0xFF;
+                int highByte = (verify >> 8) & 0xFF;
+
+                int inOutMode;
+                if (lowByte is 51 or 52 or 53)
                 {
-                    0 or 2 or 4 => 0, 
-                    1 or 3 or 5 => 1, 
-                    _ => 2            
-                };
+                    inOutMode = 0; // In
+                }
+                else if (lowByte is 101 or 102 or 103)
+                {
+                    inOutMode = 1; // Out
+                }
+                else if (lowByte is 151 or 152 or 153)
+                {
+                    inOutMode = 2; // Extra — not a plain in/out, let the caller decide
+                }
+                else if (highByte is 1 or 2 or 3 or 4 or 5)
+                {
+                    // Byte 1 carries a non-zero, meaningful attendance status.
+                    inOutMode = highByte switch { 2 or 4 => 0, 1 or 3 or 5 => 1, _ => 2 };
+                }
+                else
+                {
+                    // Neither byte gave a definitive signal (e.g. plain FP/PWD/Card verify
+                    // with no In/Out submenu and Byte 1 == 0). Let SyncService's
+                    // alternating-session fallback decide instead of guessing "in" here.
+                    inOutMode = 2;
+                }
+
+                // Preserve the full punch timestamp including seconds — truncating to the
+                // minute would make multiple genuine punches within the same minute
+                // indistinguishable from each other (e.g. 09:01:10 / 09:01:40 / 09:01:55).
+                var timestamp = new DateTime(y, mo, d, h, mi, sec);
+                var enrollStr = enroll.ToString();
 
                 allRecords.Add(new AttendancePunch
                 {
-                    EnrollNumber = enroll.ToString(),
+                    EnrollNumber = enrollStr,
                     VerifyMode = verify,
                     InOutMode = inOutMode,
-                    Timestamp = new DateTime(y, mo, d, h, mi, 0)
+                    Timestamp = timestamp,
+                    EventId = AttendanceIdentity.ComputeEventId(_deviceKey, enrollStr, timestamp, verify, inOutMode)
                 });
             }
 
@@ -87,8 +130,12 @@ public class SBXPCProvider : IAttendanceProvider
             Logger.Log($"[SBXPC] Device has {allRecords.Count} total record(s), " +
                        $"{records.Count} new since checkpoint {lastSynced:yyyy-MM-dd HH:mm:ss}.");
 
-            if (records.Count > 0)
-                _checkpoint.UpdateLastSynced(_deviceKey, records.Max(r => r.Timestamp));
+            // NOTE: the checkpoint is intentionally NOT advanced here. Advancing it right
+            // after a device read (and before the punch is durably persisted) is exactly the
+            // data-loss bug being fixed: if the app crashes between this read and the punch
+            // reaching durable storage, the checkpoint would already have moved past it and
+            // the punch would never be read from the device again. SyncService now advances
+            // the checkpoint only after these records have been durably queued.
             SBXPCNative.EnableDevice(_machineNumber, 1);
         }
         catch (Exception ex)
