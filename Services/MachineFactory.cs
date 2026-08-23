@@ -30,6 +30,8 @@ public static class MachineFactory
                 machine.IpAddress, machine.Port, machine.Username, machine.Password,
                 machineNumber, machine.Id, checkpoint),
 
+            "MOCK" => new MockProvider(machine.Id, checkpoint),
+
             _ => throw new NotSupportedException($"Unknown MachineType '{machine.MachineType}'")
         };
 

@@ -421,6 +421,199 @@ internal class Badge : Panel
     }
 }
 
+internal class IconChip : Panel
+{
+    private readonly Label _lbl = new()
+    {
+        Dock = DockStyle.Fill,
+        Font = new Font("Segoe MDL2 Assets", 15F),
+        TextAlign = ContentAlignment.MiddleCenter
+    };
+
+    public string Glyph
+    {
+        get => _lbl.Text;
+        set => _lbl.Text = value;
+    }
+
+    public Color GlyphColor
+    {
+        get => _lbl.ForeColor;
+        set => _lbl.ForeColor = value;
+    }
+
+    public IconChip()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
+        Size = new Size(44, 44);
+        Controls.Add(_lbl);
+        Theme.ApplyRoundedCorners(this, 12);
+    }
+}
+
+internal class ActionTile : CardPanel
+{
+    private readonly IconChip _chip = new();
+    private readonly Label _lblTitle = new()
+    {
+        Font = Theme.FontBodyBold,
+        ForeColor = Theme.TextPrimary,
+        AutoSize = false,
+        TextAlign = ContentAlignment.MiddleLeft
+    };
+
+    private readonly Label _lblSubtitle = new()
+    {
+        Font = Theme.FontSmall,
+        ForeColor = Theme.TextSecondary,
+        AutoSize = false,
+        TextAlign = ContentAlignment.MiddleLeft
+    };
+
+    public string Title
+    {
+        get => _lblTitle.Text;
+        set => _lblTitle.Text = value;
+    }
+
+    public string Subtitle
+    {
+        get => _lblSubtitle.Text;
+        set => _lblSubtitle.Text = value;
+    }
+
+    public string Glyph
+    {
+        get => _chip.Glyph;
+        set => _chip.Glyph = value;
+    }
+
+    public Color AccentColor
+    {
+        set { _chip.BackColor = value; _chip.GlyphColor = Theme.TextOnPrimary; }
+    }
+
+    public new event EventHandler? Click;
+
+    public ActionTile()
+    {
+        CornerRadius = 14;
+        Padding = new Padding(16);
+        Cursor = Cursors.Hand;
+
+        Controls.Add(_chip);
+        Controls.Add(_lblTitle);
+        Controls.Add(_lblSubtitle);
+
+        Resize += (_, _) => RepositionContent();
+        RepositionContent();
+
+        foreach (var c in new Control[] { this, _chip, _lblTitle, _lblSubtitle })
+        {
+            c.Click += (_, _) => Click?.Invoke(this, EventArgs.Empty);
+            c.MouseEnter += (_, _) => { SurfaceColor = Theme.SurfaceAlt; BackColor = Theme.SurfaceAlt; Invalidate(); };
+            c.MouseLeave += (_, _) => { SurfaceColor = Theme.Surface; BackColor = Theme.Surface; Invalidate(); };
+        }
+    }
+
+    private void RepositionContent()
+    {
+        int pad = Padding.Left;
+        _chip.Location = new Point(pad, pad);
+        int textX = pad + _chip.Width + 12;
+        int textWidth = Math.Max(20, Width - textX - pad);
+        _lblTitle.Location = new Point(textX, pad - 2);
+        _lblTitle.Size = new Size(textWidth, 22);
+        _lblSubtitle.Location = new Point(textX, pad + 20);
+        _lblSubtitle.Size = new Size(textWidth, 18);
+    }
+}
+
+internal class MachineRow : BufferedPanel
+{
+    private readonly DotIndicator _dot = new() { Size = new Size(10, 10) };
+    private readonly Label _lblName = new()
+    {
+        Font = Theme.FontBodyBold,
+        ForeColor = Theme.TextPrimary,
+        AutoSize = false,
+        TextAlign = ContentAlignment.MiddleLeft
+    };
+    private readonly Label _lblMeta = new()
+    {
+        Font = Theme.FontSmall,
+        ForeColor = Theme.TextSecondary,
+        AutoSize = false,
+        TextAlign = ContentAlignment.MiddleRight,
+        Dock = DockStyle.Right,
+        Width = 220
+    };
+
+    public MachineRow(string name, string meta, Color statusColor)
+    {
+        Dock = DockStyle.Top;
+        Height = 46;
+        Padding = new Padding(4, 0, 4, 0);
+
+        _dot.BackColor = statusColor;
+        _dot.Location = new Point(4, 18);
+        _lblName.Location = new Point(24, 0);
+        _lblName.Size = new Size(260, 46);
+        _lblMeta.Text = meta;
+
+        Controls.Add(_lblMeta);
+        Controls.Add(_lblName);
+        Controls.Add(_dot);
+
+        _lblName.Text = name;
+    }
+}
+
+internal class PromptDialog : Form
+{
+    private readonly TextBox _input = new();
+    public string Value => _input.Text.Trim();
+
+    public PromptDialog(string title, string label, string defaultValue = "")
+    {
+        Text = title;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        StartPosition = FormStartPosition.CenterParent;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        ClientSize = new Size(360, 150);
+        BackColor = Theme.Surface;
+
+        var lbl = new Label
+        {
+            Text = label,
+            Font = Theme.FontBody,
+            ForeColor = Theme.TextPrimary,
+            Location = new Point(20, 20),
+            Size = new Size(320, 22)
+        };
+
+        _input.Text = defaultValue;
+        Theme.StyleTextBox(_input);
+        _input.Location = new Point(20, 48);
+        _input.Size = new Size(320, 28);
+
+        var btnOk = new Button { Text = "OK", DialogResult = DialogResult.OK, Location = new Point(180, 92), Size = new Size(80, 36) };
+        var btnCancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(264, 92), Size = new Size(80, 36) };
+        Theme.StylePrimaryButton(btnOk);
+        Theme.StyleSecondaryButton(btnCancel);
+
+        Controls.Add(lbl);
+        Controls.Add(_input);
+        Controls.Add(btnOk);
+        Controls.Add(btnCancel);
+
+        AcceptButton = btnOk;
+        CancelButton = btnCancel;
+        Shown += (_, _) => _input.Focus();
+    }
+}
+
 /// <summary>Centers a fixed-max-width column of content inside a Dock.Fill container,
 /// so forms stay readable and elegant even when the window is maximized on a wide screen.
 /// On smaller/lower-resolution laptop screens the column width shrinks to fit instead of

@@ -18,33 +18,11 @@ public class DashboardForm : Form
     private readonly HeaderBanner _header = new() { Title = "Sapeagle Attendance Connector" };
     private readonly Badge _connectionBadge = new() { Text = "Connected" };
 
-    private readonly DotIndicator _statusDot = new() { Size = new Size(12, 12) };
-    private readonly Label _lblStatus = new()
-    {
-        Dock = DockStyle.Fill,
-        Font = Theme.FontHeading,
-        ForeColor = Theme.TextPrimary,
-        BackColor = Theme.Surface,
-        TextAlign = ContentAlignment.MiddleLeft,
-        AutoEllipsis = true
-    };
+    private readonly StatCard _statusStat = new();
+    private readonly StatCard _machinesStat = new();
+    private readonly StatCard _lastSyncStat = new();
 
-    private readonly Label _lblLastSync = new()
-    {
-        Dock = DockStyle.Top,
-        Height = 22,
-        Font = Theme.FontSmall,
-        ForeColor = Theme.TextSecondary
-    };
-
-    private readonly Button _btnSyncNow = new() { Text = "Sync Now" };
-    private readonly Button _btnSyncEmployees = new() { Text = "Sync Employees" };
-    private readonly Button _btnMapUsers = new() { Text = "Map Users" };
-    private readonly Button _btnExit = new() { Text = "Exit" };
-    // Reset Checkpoint button intentionally hidden from the UI (kept out of layout/tray menu
-    // below) - resetting a checkpoint forces the next sync to re-read a device's old backlog,
-    // which re-inserts already-synced records as duplicates. RunResetCheckpointAsync() is kept
-    // in the code below, unused, in case a support workflow needs it again later.
+    private readonly Panel _machineListHost = new() { Dock = DockStyle.Top, AutoSize = true };
 
     public DashboardForm(
     CompanyConfig company,
@@ -75,6 +53,8 @@ public class DashboardForm : Form
         BackColor = Theme.Background;
         SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
 
+        _header.GradientStart = Theme.PrimaryDarker;
+        _header.GradientEnd = Theme.Primary;
         _header.Subtitle = "Company : " + string.Join(", ", _company.Machines.Select(m => m.CompanyName).Distinct());
 
         _header.Controls.Add(_connectionBadge);
@@ -85,11 +65,6 @@ public class DashboardForm : Form
 
         Controls.Add(body);
         Controls.Add(_header);
-
-        _btnSyncNow.Click += async (_, _) => await RunSyncAsync();
-        _btnSyncEmployees.Click += async (_, _) => await RunEmployeeSyncAsync();
-        _btnMapUsers.Click += async (_, _) => await RunMapUsersAsync();
-        _btnExit.Click += (_, _) => { _trayIcon.Visible = false; Application.Exit(); };
 
         _trayIcon = new NotifyIcon
         {
@@ -121,7 +96,7 @@ public class DashboardForm : Form
         };
 
         SetStatus("Initializing...");
-        _lblLastSync.Text = "Last sync : —";
+        RefreshMachineList();
 
         _timer.Tick += async (_, _) => await RunSyncAsync();
         Load += async (_, _) => { _timer.Start(); await RunSyncAsync(); };
@@ -129,71 +104,114 @@ public class DashboardForm : Form
 
     private Panel BuildBody()
     {
-        var statusCard = new CardPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(22) };
-
-        var statusHeaderRow = new BufferedPanel { Dock = DockStyle.Top, Height = 26, Padding = new Padding(20, 0, 0, 0) };
-        _statusDot.BackColor = Theme.Success;
-        _statusDot.Location = new Point(0, 7);
-        statusHeaderRow.Controls.Add(_statusDot);
-        statusHeaderRow.Controls.Add(_lblStatus);
-
-        // Bottom-to-top add order (see EmployeeSyncForm notes).
-        statusCard.Controls.Add(_lblLastSync);
-        statusCard.Controls.Add(statusHeaderRow);
-
-        var actionsCard = new CardPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(22), Margin = new Padding(0, 16, 0, 0) };
-        var actionsLabel = new Label
-        {
-            Text = "QUICK ACTIONS",
-            Dock = DockStyle.Top,
-            Height = 22,
-            Font = Theme.FontSmallBold,
-            ForeColor = Theme.TextSecondary
-        };
-
-        Theme.StylePrimaryButton(_btnSyncNow);
-        Theme.StylePrimaryButton(_btnSyncEmployees);
-        Theme.StyleSecondaryButton(_btnMapUsers);
-        Theme.StyleSecondaryButton(_btnExit);
-        foreach (var b in new[] { _btnSyncNow, _btnSyncEmployees, _btnMapUsers, _btnExit })
-            Theme.ApplyRoundedCorners(b, 8);
-
-        var buttonRow = new TableLayoutPanel
+        var statsRow = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            ColumnCount = 4,
-            RowCount = 1,
-            Margin = new Padding(0, 10, 0, 0)
+            ColumnCount = 3,
+            RowCount = 1
         };
-        buttonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
-        buttonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
-        buttonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
-        buttonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
-        buttonRow.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+        statsRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.3F));
+        statsRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.3F));
+        statsRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.4F));
+        statsRow.RowStyles.Add(new RowStyle(SizeType.Absolute, 118));
 
-        var actionButtons = new[] { _btnSyncNow, _btnSyncEmployees, _btnMapUsers, _btnExit };
-        foreach (var b in actionButtons)
+        _statusStat.Caption = "Status";
+        _statusStat.IconGlyph = "\uE73E";
+        _statusStat.IconBackColor = Theme.Success;
+        _statusStat.Value = "Initializing...";
+        _statusStat.Dock = DockStyle.Fill;
+        _statusStat.Margin = new Padding(0, 0, 8, 0);
+
+        _machinesStat.Caption = "Machines";
+        _machinesStat.IconGlyph = "\uE977";
+        _machinesStat.IconBackColor = Theme.Primary;
+        _machinesStat.Value = _company.Machines.Count.ToString();
+        _machinesStat.Dock = DockStyle.Fill;
+        _machinesStat.Margin = new Padding(8, 0, 8, 0);
+
+        _lastSyncStat.Caption = "Last Sync";
+        _lastSyncStat.IconGlyph = "\uE121";
+        _lastSyncStat.IconBackColor = Theme.Accent;
+        _lastSyncStat.Value = "\u2014";
+        _lastSyncStat.Dock = DockStyle.Fill;
+        _lastSyncStat.Margin = new Padding(8, 0, 0, 0);
+
+        statsRow.Controls.Add(_statusStat, 0, 0);
+        statsRow.Controls.Add(_machinesStat, 1, 0);
+        statsRow.Controls.Add(_lastSyncStat, 2, 0);
+
+        var machinesCard = new CardPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(22), Margin = new Padding(0, 16, 0, 0) };
+        var machinesLabel = new Label
         {
-            b.AutoSize = false;
-            b.Dock = DockStyle.Fill;
-            b.Margin = new Padding(0, 0, 12, 12);
+            Text = "CONNECTED MACHINES",
+            Dock = DockStyle.Top,
+            Height = 24,
+            Font = Theme.FontSmallBold,
+            ForeColor = Theme.TextSecondary
+        };
+        _machineListHost.Dock = DockStyle.Top;
+        machinesCard.Controls.Add(_machineListHost);
+        machinesCard.Controls.Add(machinesLabel);
+
+        var actionsLabel = new Label
+        {
+            Text = "QUICK ACTIONS",
+            Dock = DockStyle.Top,
+            Height = 24,
+            Font = Theme.FontSmallBold,
+            ForeColor = Theme.TextSecondary,
+            Margin = new Padding(0, 16, 0, 0)
+        };
+
+        var tileGrid = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 3,
+            RowCount = 2
+        };
+        tileGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.3F));
+        tileGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.3F));
+        tileGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.4F));
+        tileGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 76));
+        tileGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 76));
+
+        var tileSync = MakeTile("\uE895", "Sync Now", "Pull latest punches", Theme.Primary);
+        tileSync.Click += async (_, _) => await RunSyncAsync();
+
+        var tileEmployees = MakeTile("\uE716", "Sync Employees", "Push employees to device", Theme.Accent);
+        tileEmployees.Click += async (_, _) => await RunEmployeeSyncAsync();
+
+        var tileMap = MakeTile("\uE8C8", "Map Users", "Link machine to ERP users", Theme.Success);
+        tileMap.Click += async (_, _) => await RunMapUsersAsync();
+
+        var tileSimulate = MakeTile("\uE945", "Simulate Punch", "Test without hardware", Theme.Warning);
+        tileSimulate.Click += async (_, _) => await RunSimulatePunchAsync();
+
+        var tileLogs = MakeTile("\uE7C3", "Open Logs", "View connector log file", Theme.TextSecondary);
+        tileLogs.Click += (_, _) => OpenLogsFolder();
+
+        var tileExit = MakeTile("\uE711", "Exit", "Close the connector", Theme.Danger);
+        tileExit.Click += (_, _) => { _trayIcon.Visible = false; Application.Exit(); };
+
+        var tiles = new[] { tileSync, tileEmployees, tileMap, tileSimulate, tileLogs, tileExit };
+        for (int i = 0; i < tiles.Length; i++)
+        {
+            tiles[i].Dock = DockStyle.Fill;
+            tiles[i].Margin = new Padding(0, 0, 10, 10);
+            tileGrid.Controls.Add(tiles[i], i % 3, i / 3);
         }
-        buttonRow.Controls.Add(actionButtons[0], 0, 0);
-        buttonRow.Controls.Add(actionButtons[1], 1, 0);
-        buttonRow.Controls.Add(actionButtons[2], 2, 0);
-        buttonRow.Controls.Add(actionButtons[3], 3, 0);
 
-        // Bottom-to-top: buttonRow added first, then label above it.
-        actionsCard.Controls.Add(buttonRow);
-        actionsCard.Controls.Add(actionsLabel);
+        var stack = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 1, RowCount = 4, AutoSize = true, BackColor = Theme.Background };
+        stack.Controls.Add(statsRow, 0, 0);
+        stack.Controls.Add(machinesCard, 0, 1);
+        stack.Controls.Add(actionsLabel, 0, 2);
+        stack.Controls.Add(tileGrid, 0, 3);
 
-        var stack = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 1, RowCount = 2, AutoSize = true, BackColor = Theme.Background };
-        stack.Controls.Add(statusCard, 0, 0);
-        stack.Controls.Add(actionsCard, 0, 1);
-
-        var centered = new CenteredColumn(720) { Padding = new Padding(0, 24, 0, 24) };
+        var centered = new CenteredColumn(900) { Padding = new Padding(0, 24, 0, 24) };
         centered.Content = stack;
 
         var scrollHost = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = Theme.Background };
@@ -201,19 +219,79 @@ public class DashboardForm : Form
         return scrollHost;
     }
 
+    private static ActionTile MakeTile(string glyph, string title, string subtitle, Color accent)
+    {
+        var tile = new ActionTile
+        {
+            Glyph = glyph,
+            Title = title,
+            Subtitle = subtitle,
+            AccentColor = accent
+        };
+        return tile;
+    }
+
+    private void RefreshMachineList()
+    {
+        _machineListHost.Controls.Clear();
+
+        if (_company.Machines.Count == 0)
+        {
+            var empty = new Label
+            {
+                Text = "No machines activated yet.",
+                Dock = DockStyle.Top,
+                Height = 32,
+                Font = Theme.FontBody,
+                ForeColor = Theme.TextSecondary
+            };
+            _machineListHost.Controls.Add(empty);
+            return;
+        }
+
+        var rows = _company.Machines
+            .OrderBy(m => m.MachineName)
+            .Select(m => new MachineRow(m.MachineName, m.CompanyName, Theme.Success))
+            .ToList();
+
+        for (int i = rows.Count - 1; i >= 0; i--)
+            _machineListHost.Controls.Add(rows[i]);
+
+        _machinesStat.Value = _company.Machines.Count.ToString();
+    }
+
     private void SetStatus(string message)
     {
-        _lblStatus.Text = message;
+        _statusStat.Value = message;
         var lower = message.ToLowerInvariant();
-        _statusDot.BackColor = lower.Contains("fail") || lower.Contains("error") || lower.Contains("could not")
-            ? Theme.Danger
-            : lower.Contains("syncing") || lower.Contains("initializ")
-                ? Theme.Warning
-                : Theme.Success;
 
-        _lblStatus.Parent?.Invalidate(true);
-        _lblStatus.Invalidate();
-        _statusDot.Invalidate();
+        if (lower.Contains("fail") || lower.Contains("error") || lower.Contains("could not"))
+        {
+            _statusStat.IconBackColor = Theme.Danger;
+            _statusStat.IconGlyph = "\uE783";
+            _connectionBadge.Text = "Error";
+            _connectionBadge.PillBackColor = Theme.DangerLight;
+            _connectionBadge.PillForeColor = Theme.Danger;
+        }
+        else if (lower.Contains("syncing") || lower.Contains("initializ"))
+        {
+            _statusStat.IconBackColor = Theme.Warning;
+            _statusStat.IconGlyph = "\uE895";
+            _connectionBadge.Text = "Syncing";
+            _connectionBadge.PillBackColor = Theme.WarningLight;
+            _connectionBadge.PillForeColor = Theme.Warning;
+        }
+        else
+        {
+            _statusStat.IconBackColor = Theme.Success;
+            _statusStat.IconGlyph = "\uE73E";
+            _connectionBadge.Text = "Connected";
+            _connectionBadge.PillBackColor = Theme.SuccessLight;
+            _connectionBadge.PillForeColor = Theme.Success;
+        }
+
+        _statusStat.Invalidate(true);
+        _connectionBadge.Invalidate();
     }
 
     private async Task RunSyncAsync()
@@ -222,15 +300,13 @@ public class DashboardForm : Form
         var machineIds = _company.Machines.Select(m => m.MachineId).ToList();
         Logger.Log($"[Dashboard] RunSyncAsync: company has {_company.Machines.Count} activated machine(s), MachineIds=[{string.Join(", ", machineIds)}]");
         await _syncService.RunCycleAsync(machineIds);
-        _lblLastSync.Text = $"Last sync : {_syncService.LastSyncTime:hh:mm tt}";
+        _lastSyncStat.Value = $"{_syncService.LastSyncTime:hh:mm tt}";
+        SetStatus("Connected");
     }
 
     private async Task RunEmployeeSyncAsync()
     {
         _timer.Stop();
-        _btnSyncEmployees.Enabled = false;
-        // Wait for any auto-sync cycle already in flight to finish before touching the
-        // device — the SBXPC connection is not safe to use from two threads at once.
         await _syncService.DeviceLock.WaitAsync();
         try
         {
@@ -315,7 +391,6 @@ public class DashboardForm : Form
         finally
         {
             _syncService.DeviceLock.Release();
-            _btnSyncEmployees.Enabled = true;
             _timer.Start();
         }
     }
@@ -323,9 +398,6 @@ public class DashboardForm : Form
     private async Task RunMapUsersAsync()
     {
         _timer.Stop();
-        _btnMapUsers.Enabled = false;
-        // Same reasoning as RunEmployeeSyncAsync: don't let this run concurrently with an
-        // in-flight auto-sync cycle on the same device connection.
         await _syncService.DeviceLock.WaitAsync();
         try
         {
@@ -386,20 +458,71 @@ public class DashboardForm : Form
         finally
         {
             _syncService.DeviceLock.Release();
-            _btnMapUsers.Enabled = true;
             _timer.Start();
         }
     }
 
-    /// <summary>
-    /// Runs once, ever, on this machine. As of this update, whatever backlog exists on
-    /// each activated device has already been synced (and any duplicates already cleaned
-    /// up in the database) - so every activated device's checkpoint is fast-forwarded to
-    /// "now" here, meaning the very next sync only pulls punches that happen after this
-    /// moment instead of re-reading the device's old backlog and creating duplicates again.
-    /// A marker file makes sure this only ever runs the first time the app starts after
-    /// this update; later runs are no-ops.
-    /// </summary>
+    private async Task RunSimulatePunchAsync()
+    {
+        var machines = new List<MachineConfig>();
+        foreach (var m in _company.Machines)
+        {
+            var mc = await _apiService.GetMachineAsync(m.MachineId);
+            if (mc != null && string.Equals(mc.MachineType?.Trim(), "MOCK", StringComparison.OrdinalIgnoreCase))
+                machines.Add(mc);
+        }
+
+        if (machines.Count == 0)
+        {
+            MessageBox.Show(this,
+                "No machine with MachineType 'MOCK' found. Add one to test without hardware.",
+                "Simulate Punch", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        MachineConfig machine;
+        if (machines.Count == 1)
+        {
+            machine = machines[0];
+        }
+        else
+        {
+            using var picker = new MachinePickerDialog(machines);
+            if (picker.ShowDialog(this) != DialogResult.OK || picker.SelectedMachine == null) return;
+            machine = picker.SelectedMachine;
+        }
+
+        using var prompt = new PromptDialog("Simulate Punch", "Enroll Number", "101");
+        if (prompt.ShowDialog(this) != DialogResult.OK || string.IsNullOrWhiteSpace(prompt.Value)) return;
+
+        using var mock = new MockProvider(machine.Id, _checkpointService);
+        mock.SimulatePunch(prompt.Value);
+
+        MessageBox.Show(this,
+            $"Punch simulated for enroll number '{prompt.Value}' on '{machine.MachineName}'.\nRun Sync Now to pull it in.",
+            "Simulate Punch", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    private static void OpenLogsFolder()
+    {
+        var dir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "SapeagleAttendanceConnector");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = dir,
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            Logger.Log($"[Dashboard] OpenLogsFolder error: {ex.Message}");
+        }
+    }
+
     private async Task FastForwardCheckpointsOnceAsync()
     {
         var dataDir = Path.Combine(
@@ -470,7 +593,6 @@ public class DashboardForm : Form
         MessageBox.Show(this, $"Checkpoint reset ho gaya '{machine.MachineName}' ke liye.",
             "Reset Checkpoint", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
-
 
     private void PositionConnectionBadge()
     {
