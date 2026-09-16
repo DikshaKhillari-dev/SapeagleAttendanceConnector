@@ -351,6 +351,21 @@ public class DashboardForm : Form
 
                 Logger.Log($"[EmployeeSync] '{machine.MachineName}' DeviceId(raw)='{machine.DeviceId}' parsed -> machineNumber={machineNumber}");
 
+                if (string.Equals(machine.MachineType?.Trim(), "ETIMEOFFICE", StringComparison.OrdinalIgnoreCase))
+                {
+                    // eTimeOffice's API exposes no employee create/delete endpoint (confirmed
+                    // with vendor support), so "Sync Employees" (which enrolls ERP employees
+                    // onto the device) can never succeed here — every row would just log a
+                    // silent CreateEmployee=false. Point the user at "Map Existing Users"
+                    // instead, which uses AttendanceEmployeeMapping and actually works.
+                    MessageBox.Show(this,
+                        $"'{machine.MachineName}' is an eTimeOffice cloud machine. eTimeOffice does not support " +
+                        "creating or deleting employees via its API — enrollment must be done on eTimeOffice's own portal. " +
+                        "Use \"Map Existing Users\" to map its enroll numbers to ERP employees instead.",
+                        "Employee Sync not supported", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    continue;
+                }
+
                 _syncService.DisconnectMachine(machine.Id);
 
                 var preview = await _employeeSyncService.PrepareAsync(machine, machineNumber);

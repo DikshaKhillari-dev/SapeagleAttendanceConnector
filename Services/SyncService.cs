@@ -159,6 +159,7 @@ public class SyncService
         // durable storage (queue.json), regardless of whether it has been sent yet.
         var newlyPersisted = new List<AttendanceLog>();
         DateTime? maxDurablyStoredTimestamp = null;
+        bool persistFailed = false;
 
         foreach (var p in punches) // punches are already ordered ascending by Timestamp
         {
@@ -215,6 +216,7 @@ public class SyncService
                 // next cycle, since the checkpoint hasn't moved past them.
                 Logger.Log($"[Sync] {deviceLabel}: failed to durably persist EventId={log.EventId} EnrollNumber={log.EnrollNumber} " +
                            $"Time={log.Timestamp:yyyy-MM-dd HH:mm:ss} — stopping this cycle's batch here; checkpoint will not advance past it.");
+                persistFailed = true;
                 break;
             }
 
@@ -233,9 +235,19 @@ public class SyncService
         }
 
         if (maxDurablyStoredTimestamp.HasValue)
+        {
             _checkpointService.UpdateLastSynced(provider.DeviceKey, maxDurablyStoredTimestamp.Value);
 
-        // ---- Now process/send this cycle's freshly-persisted (live/current) punches ----
+            // The token checkpoint (e.g. eTimeOffice's MaxRecord) represents the whole
+            // batch the device returned, not just what made it to durable storage. If a
+            // persist failed partway through this batch, committing the token anyway
+            // would tell the device "everything up to here is synced" and permanently
+            // skip the punches that never got durably stored. Only commit when the full
+            // batch was durably persisted.
+            if (!persistFailed && provider is ITokenCheckpointProvider tokenProvider)
+                tokenProvider.CommitPendingCheckpoint();
+        }
+
         int sent = 0, queued = 0;
 
         foreach (var log in newlyPersisted)

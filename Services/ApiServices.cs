@@ -163,7 +163,11 @@ public class ApiService
         {
             var msg = $"Employee not found/mapped for EnrollNumber='{punch.EnrollNumber}' ComId={punch.ComId}.";
             Logger.Log($"[Api] SendPunchAsync: {msg} Punch NOT sent.");
-            return SendOutcome.Permanent(msg);
+            // Treat as transient, not permanent: the employee may simply not be mapped
+            // yet (e.g. a machine enroll number with no AttendanceEmployeeMapping entry).
+            // Once someone adds the mapping, retries should pick the punch up on their
+            // own instead of it sitting dead in DeadLetter forever.
+            return SendOutcome.Transient(msg);
         }
 
         try
@@ -241,7 +245,9 @@ public class ApiService
         {
             var msg = $"Employee not found/mapped for EnrollNumber='{punch.EnrollNumber}' ComId={punch.ComId}.";
             Logger.Log($"[Api] SendManualAttendanceAsync: {msg} Punch NOT sent.");
-            return SendOutcome.Permanent(msg);
+            // See SendPunchAsync: unmapped employee is transient, not permanent — self-heals
+            // once the mapping is added instead of dying in DeadLetter.
+            return SendOutcome.Transient(msg);
         }
 
         var attendanceType = string.IsNullOrEmpty(punch.AttendanceType) ? "PunchIn" : punch.AttendanceType;

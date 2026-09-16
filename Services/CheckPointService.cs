@@ -7,6 +7,8 @@ public class CheckpointService
     private readonly string _path;
     private readonly object _lock = new();
     private Dictionary<string, DateTime> _checkpoints;
+    private readonly string _tokenPath;
+    private Dictionary<string, string> _tokenCheckpoints;
 
     public CheckpointService()
     {
@@ -16,6 +18,8 @@ public class CheckpointService
         Directory.CreateDirectory(dataDir);
         _path = Path.Combine(dataDir, "checkpoints.json");
         _checkpoints = LoadInternal();
+        _tokenPath = Path.Combine(dataDir, "checkpoint_tokens.json");
+        _tokenCheckpoints = LoadTokenInternal();
     }
 
     public DateTime GetLastSynced(string deviceKey)
@@ -115,5 +119,43 @@ public class CheckpointService
         {
             return new Dictionary<string, DateTime>(_checkpoints);
         }
+    }
+    public string GetLastToken(string deviceKey)
+    {
+        lock (_lock)
+        {
+            return _tokenCheckpoints.TryGetValue(deviceKey, out var t) ? t : "";
+        }
+    }
+
+    public void UpdateLastToken(string deviceKey, string token)
+    {
+        lock (_lock)
+        {
+            _tokenCheckpoints[deviceKey] = token;
+            SaveTokenInternal(_tokenCheckpoints);
+        }
+    }
+
+    private Dictionary<string, string> LoadTokenInternal()
+    {
+        if (!File.Exists(_tokenPath)) return new Dictionary<string, string>();
+        try
+        {
+            var text = ReadWithRetry(_tokenPath);
+            return JsonSerializer.Deserialize<Dictionary<string, string>>(text)
+                   ?? new Dictionary<string, string>();
+        }
+        catch (Exception ex)
+        {
+            Logger.Log($"[Checkpoint] LoadTokenInternal: failed after retries - {ex.Message}");
+            return new Dictionary<string, string>();
+        }
+    }
+
+    private void SaveTokenInternal(Dictionary<string, string> data)
+    {
+        var json = JsonSerializer.Serialize(data, new JsonSerializerOptions { WriteIndented = true });
+        WriteWithRetry(_tokenPath, json);
     }
 }

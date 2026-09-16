@@ -12,13 +12,6 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<None Include="Providers\SBXPC\SDK\SBXPCDLL64.dll">
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-		</None>
-		<None Include="Providers\SBXPC\SDK\SBPCCOMM64.dll">
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-		</None>
-
 		<None Include="Providers\HikVision\SDK\**\*.dll">
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 			<Link>%(RecursiveDir)%(Filename)%(Extension)</Link>

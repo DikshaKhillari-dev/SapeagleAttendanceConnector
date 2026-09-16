@@ -1,5 +1,5 @@
 using SapeagleAttendanceConnector.Models;
-using SapeagleAttendanceConnector.SBXPC;
+using SapeagleAttendanceConnector.ETimeOffice;
 using SapeagleAttendanceConnector.Hikvision;
 
 namespace SapeagleAttendanceConnector.Services;
@@ -20,11 +20,12 @@ public static class MachineFactory
                 machine.Id,
                 checkpoint),
 
-            "SBXPC" => new SBXPCProvider(
-                machine.IpAddress, machine.Port, machineNumber,
-                int.TryParse(machine.Password, out var pw) ? pw : 0,
-                machine.Id,
-                checkpoint),
+            "ETIMEOFFICE" => new ETimeOfficeCloudProvider(
+                 machine.IpAddress,       
+                 machine.Username,
+                 machine.Password,
+                 machine.Id,
+                 checkpoint),
 
             "HIKVISION" => new HikvisionProvider(
                 machine.IpAddress, machine.Port, machine.Username, machine.Password,

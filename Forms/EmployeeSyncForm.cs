@@ -697,6 +697,12 @@ internal class MachineEmployeesListForm : Form
         _btnDelete.Enabled = false;
         _btnDelete.Click += BtnDelete_Click;
 
+        // eTimeOffice's cloud API has no delete-employee endpoint (confirmed with vendor
+        // support) — DeleteEmployee always returns false for it. Hide the button entirely
+        // rather than let it silently fail on every selection.
+        if (_provider is SapeagleAttendanceConnector.ETimeOffice.ETimeOfficeCloudProvider)
+            _btnDelete.Visible = false;
+
         Theme.StylePrimaryButton(_btnClose);
         _btnClose.AutoSize = true;
         _btnClose.AutoSizeMode = AutoSizeMode.GrowAndShrink;
