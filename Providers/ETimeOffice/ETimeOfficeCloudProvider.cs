@@ -9,6 +9,7 @@ namespace SapeagleAttendanceConnector.ETimeOffice;
 public class ETimeOfficeCloudProvider : IAttendanceProvider, ITokenCheckpointProvider
 {
 	private const string ApiUrl = "https://api.etimeoffice.com/api/DownloadLastPunchData";
+	private const string PunchDataApiUrl = "https://api.etimeoffice.com/api/DownloadPunchData";
 
 	private readonly string _corporateId;
 	private readonly string _username;
@@ -43,10 +44,6 @@ public class ETimeOfficeCloudProvider : IAttendanceProvider, ITokenCheckpointPro
         var lastRecord = _checkpoint.GetLastToken(_deviceKey);
         if (string.IsNullOrEmpty(lastRecord) || !lastRecord.Contains('$'))
         {
-            // eTimeOffice's API rejects a blank LastRecord, and when a query window has zero
-            // punches it returns MaxRecord="0" (no "$") instead of a real MMyyyy$ID token.
-            // Blindly persisting that bare "0" corrupts the next call's LastRecord, so treat
-            // anything without "$" as "no real checkpoint" and reseed from the current month.
             lastRecord = $"{DateTime.Now:MMyyyy}$0";
             Logger.Log($"[ETimeOffice] No usable checkpoint token (was '{_checkpoint.GetLastToken(_deviceKey)}') — seeding LastRecord='{lastRecord}'.");
         }
@@ -117,7 +114,60 @@ public class ETimeOfficeCloudProvider : IAttendanceProvider, ITokenCheckpointPro
 		}
 	}
 
-	public List<Models.MachineEmployee> ReadExistingEmployees() => new();
+	public List<Models.MachineEmployee> ReadExistingEmployees()
+	{
+		var result = new List<Models.MachineEmployee>();
+
+		var fromDate = DateTime.Now.AddMonths(-1);
+		var toDate = DateTime.Now;
+
+		try
+		{
+			var url = $"{PunchDataApiUrl}?Empcode=ALL" +
+				$"&FromDate={Uri.EscapeDataString(fromDate.ToString("dd/MM/yyyy_HH:mm"))}" +
+				$"&ToDate={Uri.EscapeDataString(toDate.ToString("dd/MM/yyyy_HH:mm"))}";
+
+			var resp = _http.GetAsync(url).GetAwaiter().GetResult();
+			var body = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+
+			if (!resp.IsSuccessStatusCode)
+			{
+				Logger.Log($"[ETimeOffice] ReadExistingEmployees: HTTP {(int)resp.StatusCode} {resp.StatusCode}. Body: {body}");
+				return result;
+			}
+
+			var parsed = JsonSerializer.Deserialize<PunchDataResponse>(body,
+				new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+			if (parsed == null || parsed.Error)
+			{
+				Logger.Log($"[ETimeOffice] ReadExistingEmployees: Error or null response. Msg={parsed?.Msg}");
+				return result;
+			}
+
+			var byCode = new Dictionary<string, Models.MachineEmployee>();
+			foreach (var p in parsed.PunchData)
+			{
+				if (string.IsNullOrWhiteSpace(p.Empcode)) continue;
+
+				byCode[p.Empcode] = new Models.MachineEmployee
+				{
+					EnrollNumber = p.Empcode,
+					Name = p.Name
+				};
+			}
+
+			result = byCode.Values.ToList();
+			Logger.Log($"[ETimeOffice] ReadExistingEmployees: {parsed.PunchData.Count} punch(es) -> {result.Count} unique employee(s) in range {fromDate:dd/MM/yyyy} - {toDate:dd/MM/yyyy}.");
+		}
+		catch (Exception ex)
+		{
+			Logger.Log($"[ETimeOffice] ReadExistingEmployees: exception - {ex.Message}");
+		}
+
+		return result;
+	}
+
 	public bool CreateEmployee(string enrollNumber, string employeeName, string? fallbackNumericId = null) => false;
 	public bool DeleteEmployee(string enrollNumber) => false;
 
@@ -137,5 +187,21 @@ public class ETimeOfficeCloudProvider : IAttendanceProvider, ITokenCheckpointPro
 		public string Name { get; set; } = "";
 		public string Empcode { get; set; } = "";
 		public string PunchDate { get; set; } = "";
+	}
+
+	private class PunchDataResponse
+	{
+		public bool Error { get; set; }
+		public string Msg { get; set; } = "";
+		public bool IsAdmin { get; set; }
+		public List<PunchDataItem> PunchData { get; set; } = new();
+	}
+
+	private class PunchDataItem
+	{
+		public string Name { get; set; } = "";
+		public string Empcode { get; set; } = "";
+		public string PunchDate { get; set; } = "";
+		public string? M_Flag { get; set; }
 	}
 }
